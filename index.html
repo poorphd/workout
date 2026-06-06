@@ -80,11 +80,11 @@
   .t3-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
   .t3-card { background: var(--l0); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
   .t3-title { font-size: 12px; color: var(--muted); font-weight: 700; margin-bottom: 8px; }
-  .t3-row { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 4px; }
+  .t3-row { display: flex; align-items: baseline; gap: 6px; font-size: 13px; margin-bottom: 5px; }
   .t3-row:last-child { margin-bottom: 0; }
   .t3-medal { width: 18px; text-align: center; flex-shrink: 0; }
-  .t3-name { font-weight: 700; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .t3-val { color: var(--accent); font-weight: 700; font-size: 12px; flex-shrink: 0; }
+  .t3-name { font-weight: 700; flex: 1; word-break: keep-all; line-height: 1.35; }
+  .t3-val { color: var(--accent); font-weight: 700; font-size: 12px; flex-shrink: 0; white-space: nowrap; }
   .t3-empty { font-size: 12px; color: var(--muted); }
 
   /* weekly goals */
@@ -201,12 +201,18 @@ function streakFromDays(byDay) {
 }
 
 // one TOP-3 card. entries: [{n, v}] (unsorted); fmt formats the value
+// Ranks by distinct value (Olympic style): ties share a rank and their names are listed together.
 function top3Card(title, entries, fmt) {
-  const arr = entries.filter((x) => x.v > 0).sort((a, b) => b.v - a.v || a.n.localeCompare(b.n)).slice(0, 3);
+  const valid = entries.filter((x) => x.v > 0);
+  if (!valid.length) return `<div class="t3-card"><div class="t3-title">${title}</div><div class="t3-empty">아직 기록 없음</div></div>`;
+  const byVal = new Map();
+  for (const x of valid) { if (!byVal.has(x.v)) byVal.set(x.v, []); byVal.get(x.v).push(x.n); }
+  const ranks = [...byVal.keys()].sort((a, b) => b - a).slice(0, 3); // top 3 distinct values
   const medals = ["🥇", "🥈", "🥉"];
-  const body = arr.length
-    ? arr.map((x, i) => `<div class="t3-row"><span class="t3-medal">${medals[i]}</span><span class="t3-name">${x.n}</span><span class="t3-val">${fmt(x.v)}</span></div>`).join("")
-    : `<div class="t3-empty">아직 기록 없음</div>`;
+  const body = ranks.map((v, i) => {
+    const names = byVal.get(v).sort((a, b) => a.localeCompare(b)).join(", ");
+    return `<div class="t3-row"><span class="t3-medal">${medals[i]}</span><span class="t3-name">${names}</span><span class="t3-val">${fmt(v)}</span></div>`;
+  }).join("");
   return `<div class="t3-card"><div class="t3-title">${title}</div>${body}</div>`;
 }
 
