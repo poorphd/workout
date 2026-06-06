@@ -36,7 +36,7 @@ scripts/
 
 | Command | Action |
 |---------|--------|
-| `/운동 인증` | Check in for today via a modal (optional duration/calories; multiple per day allowed) |
+| `/운동 인증` | Start a DM check-in conversation (duration, calories, photo; multiple per day allowed) |
 | `/운동 취소` | Cancel today's check-in(s) |
 | `/운동 내기록` | Your monthly workout days, longest streak, metrics, weekly goal |
 | `/운동 순위` | This month's leaderboard (by distinct workout days) |

@@ -1,42 +1,32 @@
-// Slack /운동 slash command handler (Supabase Edge Function, Deno)
+// Slack /운동 slash command + DM conversation handler (Supabase Edge Function, Deno)
 // Deploy: supabase functions deploy slack --no-verify-jwt
 //   (Slack doesn't send a Supabase JWT, so disable JWT verification and verify the Slack signature instead)
-// Secrets: SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN
+// Secrets: SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, SLACK_CHANNEL_ID
 //   (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are injected automatically by Supabase)
 //
-// Subcommands:
-//   /운동 인증            check in for today (modal: optional time/calories; first-timers also pick a name)
-//   /운동 취소            cancel today's check-in
-//   /운동 내기록          your monthly count / longest streak
-//   /운동 순위            this month's leaderboard
-//   /운동 이름변경 <name> change nickname
-//   /운동 (도움말)        help
+// Check-in is a Geekbot-style DM conversation: /운동 인증 starts a DM where the bot asks
+// duration / calories / photo one at a time; on finish it posts the day's thread comment
+// (rank change + weekly goal + the photo) to the channel.
+//
+// Other subcommands stay one-shot: /운동 취소 | 내기록 | 순위 | 이름변경 <name> | 목표설정 <n>
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SIGNING_SECRET = Deno.env.get("SLACK_SIGNING_SECRET")!;
 const BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
-const CHANNEL_ID = Deno.env.get("SLACK_CHANNEL_ID"); // channel for check-in threads (no channel = skip notifications)
-const supabase = createClient(
-  Deno.env.get("SUPABASE_URL")!,
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-);
+const CHANNEL_ID = Deno.env.get("SLACK_CHANNEL_ID"); // channel for check-in threads
+const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
 const MONTH_NAMES = ["1월","2월","3월","4월","5월","6월","7월","8월","9월","10월","11월","12월"];
 
 // ── KST date helpers ──
 function todayKST(): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
-  }).format(new Date());
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 }
-const thisMonthKST = () => todayKST().slice(0, 7); // YYYY-MM
-
-// Monday of the current week (KST, YYYY-MM-DD)
+const thisMonthKST = () => todayKST().slice(0, 7);
 function weekStartKST(): string {
   const [y, m, d] = todayKST().split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
-  const back = (dt.getUTCDay() + 6) % 7; // Monday = 0
-  dt.setUTCDate(dt.getUTCDate() - back);
+  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7)); // back to Monday
   return dt.toISOString().slice(0, 10);
 }
 
@@ -46,80 +36,64 @@ async function verifySlack(req: Request, rawBody: string): Promise<boolean> {
   const sig = req.headers.get("x-slack-signature");
   if (!ts || !sig) return false;
   if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
-
   const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw", enc.encode(SIGNING_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
-  );
+  const key = await crypto.subtle.importKey("raw", enc.encode(SIGNING_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const mac = await crypto.subtle.sign("HMAC", key, enc.encode(`v0:${ts}:${rawBody}`));
-  const hex = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  const expected = `v0=${hex}`;
+  const expected = "v0=" + [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
   if (expected.length !== sig.length) return false;
   let diff = 0;
   for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ sig.charCodeAt(i);
   return diff === 0;
 }
 
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const ephemeral = (text: string) => json({ response_type: "ephemeral", text });
 const empty = () => new Response("", { status: 200 });
 
 const HELP = [
   "*운동 인증 봇 사용법* 💪",
-  "• `/운동 인증` — 오늘 운동 인증",
+  "• `/운동 인증` — DM에서 대화형으로 인증 (시간·칼로리·사진)",
   "• `/운동 취소` — 오늘 인증 취소",
   "• `/운동 내기록` — 내 이번달 기록",
-  "• `/운동 순위` — 이번달 리더보드",
+  "• `/운동 순위` — 이번달 리더보드 (운동 일수)",
   "• `/운동 이름변경 새이름` — 닉네임 변경",
   "• `/운동 목표설정 5` — 주간 목표 일수 설정",
 ].join("\n");
 
-// ── longest streak (YYYY-MM-DD[] → number of days) ──
-function longestStreak(dates: string[]): number {
-  if (!dates.length) return 0;
-  const sorted = [...new Set(dates)].sort();
-  const t = (s: string) => { const [y, m, d] = s.split("-").map(Number); return Date.UTC(y, m - 1, d); };
-  let best = 1, cur = 1;
-  for (let i = 1; i < sorted.length; i++) {
-    const diff = (t(sorted[i]) - t(sorted[i - 1])) / 86400000;
-    cur = diff === 1 ? cur + 1 : 1;
-    if (cur > best) best = cur;
-  }
-  return best;
-}
-
-// parse an optional positive integer metric (returns null if empty/invalid)
+// ── small utils ──
 function parseMetric(v: string | undefined, max: number): number | null {
   const n = parseInt((v ?? "").replace(/[^0-9]/g, ""), 10);
   return Number.isFinite(n) && n > 0 && n <= max ? n : null;
 }
-
-// "· 45분 · 300kcal" style suffix (empty if no metrics)
 function metricSuffix(duration: number | null, calories: number | null): string {
   const parts: string[] = [];
   if (duration != null) parts.push(`${duration}분`);
   if (calories != null) parts.push(`${calories}kcal`);
   return parts.length ? " · " + parts.join(" · ") : "";
 }
-
-// ── record a check-in (multiple per day allowed) → returns today's check-in count for this user ──
-async function recordCheckin(
-  nickname: string, slackUserId: string,
-  duration: number | null = null, calories: number | null = null,
-): Promise<number> {
-  const { error } = await supabase.from("checkins").insert({
-    checkin_date: todayKST(), nickname, slack_user_id: slackUserId,
-    duration_min: duration, calories,
-  });
-  if (error) throw error;
-  const { count } = await supabase.from("checkins")
-    .select("*", { count: "exact", head: true })
-    .eq("checkin_date", todayKST()).eq("nickname", nickname);
-  return count ?? 1;
+function longestStreak(dates: string[]): number {
+  if (!dates.length) return 0;
+  const sorted = [...new Set(dates)].sort();
+  const t = (s: string) => { const [y, m, d] = s.split("-").map(Number); return Date.UTC(y, m - 1, d); };
+  let best = 1, cur = 1;
+  for (let i = 1; i < sorted.length; i++) { cur = (t(sorted[i]) - t(sorted[i - 1])) / 86400000 === 1 ? cur + 1 : 1; if (cur > best) best = cur; }
+  return best;
 }
 
-// distinct workout days per nickname for the current month → { nickname: dayCount }
+async function slackPost(body: Record<string, unknown>): Promise<any> {
+  const res = await fetch("https://slack.com/api/chat.postMessage", {
+    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${BOT_TOKEN}` }, body: JSON.stringify(body),
+  });
+  return res.json();
+}
+const dm = (uid: string, text: string) => slackPost({ channel: uid, text });
+
+async function recordCheckin(nickname: string, slackUserId: string, duration: number | null, calories: number | null): Promise<number> {
+  const { error } = await supabase.from("checkins").insert({ checkin_date: todayKST(), nickname, slack_user_id: slackUserId, duration_min: duration, calories });
+  if (error) throw error;
+  const { count } = await supabase.from("checkins").select("*", { count: "exact", head: true }).eq("checkin_date", todayKST()).eq("nickname", nickname);
+  return count ?? 1;
+}
 async function monthlyDayCounts(ym: string): Promise<Record<string, number>> {
   const { data } = await supabase.from("checkins").select("nickname,checkin_date").gte("checkin_date", `${ym}-01`);
   const days: Record<string, Set<string>> = {};
@@ -128,105 +102,18 @@ async function monthlyDayCounts(ym: string): Promise<Record<string, number>> {
   for (const n in days) counts[n] = days[n].size;
   return counts;
 }
-
-// ── send a Slack message ──
-async function slackPost(body: Record<string, unknown>): Promise<any> {
-  const res = await fetch("https://slack.com/api/chat.postMessage", {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${BOT_TOKEN}` },
-    body: JSON.stringify(body),
-  });
-  return await res.json();
-}
-
-// ── post a check-in thread comment to the channel (rank is by distinct workout days) ──
-async function announceCheckin(
-  nickname: string, duration: number | null = null, calories: number | null = null, todayCount = 1,
-) {
-  if (!CHANNEL_ID) return;
-  const date = todayKST();
-  const [, mm, dd] = date.split("-").map(Number);
-  const ym = date.slice(0, 7);
-
-  // distinct workout days this month (after the check-in was recorded)
-  const counts = await monthlyDayCounts(ym);
-  const myAfter = counts[nickname] ?? 1;
-  const others = Object.entries(counts).filter(([n]) => n !== nickname).map(([, c]) => c);
-  const rankOf = (val: number) => 1 + others.filter((c) => c > val).length; // tied ranks (Olympic style)
-  const afterRank = rankOf(myAfter);
-
-  let rankMsg: string;
-  if (todayCount > 1) {
-    // extra check-in on a day already counted → no rank change
-    rankMsg = `💪 오늘 ${todayCount}번째 운동! ${mm}월 현재 *${afterRank}위* · ${myAfter}일`;
-  } else {
-    const myBefore = myAfter - 1; // today is a newly counted day
-    if (myBefore <= 0) {
-      rankMsg = `🎉 ${mm}월 첫 인증! 현재 *${afterRank}위*`;
-    } else {
-      const beforeRank = rankOf(myBefore);
-      rankMsg = afterRank < beforeRank
-        ? `📈 ${mm}월 순위 *${beforeRank}위 → ${afterRank}위* 상승!`
-        : `${mm}월 현재 *${afterRank}위* · ${myAfter}일`;
-    }
-  }
-
-  // get today's thread (create the parent message if missing)
-  let ts: string | null = null;
-  const { data: existing } = await supabase
-    .from("daily_threads").select("thread_ts")
-    .eq("thread_date", date).eq("channel", CHANNEL_ID).maybeSingle();
-  if (existing) {
-    ts = existing.thread_ts;
-  } else {
-    const parent = await slackPost({ channel: CHANNEL_ID, text: `*${mm}월 ${dd}일 운동 인증 스레드* 💪` });
-    if (parent?.ok && parent.ts) {
-      ts = parent.ts;
-      await supabase.from("daily_threads").insert({ thread_date: date, channel: CHANNEL_ID, thread_ts: ts });
-      // concurrency: if another call created it first, use that ts
-      const { data: canon } = await supabase
-        .from("daily_threads").select("thread_ts")
-        .eq("thread_date", date).eq("channel", CHANNEL_ID).maybeSingle();
-      if (canon) ts = canon.thread_ts;
-    }
-  }
-  if (!ts) return;
-  const wp = await weeklyProgress(nickname);
-  const goalMsg = wp ? `\n🎯 이번주 목표 달성률 *${wp.pct}%* (${wp.count}/${wp.goal})` : "";
-  const metricMsg = metricSuffix(duration, calories);
-  const header = todayCount > 1
-    ? `*${nickname}* 님이 오늘 운동을 추가로 인증했어요!`
-    : `*${nickname}* 님이 오늘의 운동을 인증했어요!`;
-  await slackPost({ channel: CHANNEL_ID, thread_ts: ts, text: `${header}${metricMsg}\n${rankMsg}${goalMsg}` });
-}
-
-// run the channel notification in the background so the response isn't delayed (waitUntil if available)
-function announceBg(nickname: string, duration: number | null = null, calories: number | null = null, todayCount = 1) {
-  const p = announceCheckin(nickname, duration, calories, todayCount).catch((e) => console.error("announce error", e));
-  const ed = (globalThis as any).EdgeRuntime;
-  if (ed?.waitUntil) ed.waitUntil(p);
-  return ed?.waitUntil ? Promise.resolve() : p;
-}
-
 async function getMember(slackUserId: string) {
-  const { data } = await supabase
-    .from("members").select("nickname, weekly_goal").eq("slack_user_id", slackUserId).maybeSingle();
+  const { data } = await supabase.from("members").select("nickname, weekly_goal").eq("slack_user_id", slackUserId).maybeSingle();
   return data;
 }
-
-// weekly goal progress (null if no goal set)
 async function weeklyProgress(nickname: string) {
-  const { data: mem } = await supabase
-    .from("members").select("weekly_goal").eq("nickname", nickname).maybeSingle();
+  const { data: mem } = await supabase.from("members").select("weekly_goal").eq("nickname", nickname).maybeSingle();
   const goal = mem?.weekly_goal ?? null;
   if (!goal) return null;
-  const { data } = await supabase
-    .from("checkins").select("checkin_date").eq("nickname", nickname).gte("checkin_date", weekStartKST());
-  const count = new Set((data ?? []).map((r) => r.checkin_date as string)).size; // distinct days
+  const { data } = await supabase.from("checkins").select("checkin_date").eq("nickname", nickname).gte("checkin_date", weekStartKST());
+  const count = new Set((data ?? []).map((r) => r.checkin_date as string)).size;
   return { count, goal, pct: Math.round((count / goal) * 100) };
 }
-
-// ── historical nicknames not yet claimed (modal options) ──
 async function unclaimedNicknames(): Promise<string[]> {
   const { data: cks } = await supabase.from("checkins").select("nickname");
   const { data: mem } = await supabase.from("members").select("nickname");
@@ -234,127 +121,177 @@ async function unclaimedNicknames(): Promise<string[]> {
   return [...new Set((cks ?? []).map((c) => c.nickname))].filter((n) => !taken.has(n)).sort();
 }
 
-// optional workout-metric input blocks (shared by both modals)
-function metricBlocks(): unknown[] {
-  return [
-    {
-      type: "input", optional: true, block_id: "duration",
-      label: { type: "plain_text", text: "운동 시간 (분)" },
-      element: { type: "number_input", is_decimal_allowed: false, action_id: "v", min_value: "1", max_value: "1440" },
-    },
-    {
-      type: "input", optional: true, block_id: "calories",
-      label: { type: "plain_text", text: "소모 칼로리 (kcal)" },
-      element: { type: "number_input", is_decimal_allowed: false, action_id: "v", min_value: "1", max_value: "10000" },
-    },
-  ];
+// ── upload a DM photo into the channel thread (download from Slack, re-upload) ──
+async function uploadPhotoToThread(threadTs: string, photo: { url: string; name: string; mime: string }, comment: string): Promise<boolean> {
+  try {
+    const fileRes = await fetch(photo.url, { headers: { authorization: `Bearer ${BOT_TOKEN}` } });
+    const bytes = new Uint8Array(await fileRes.arrayBuffer());
+    const up = await (await fetch("https://slack.com/api/files.getUploadURLExternal", {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Bearer ${BOT_TOKEN}` },
+      body: new URLSearchParams({ filename: photo.name, length: String(bytes.length) }),
+    })).json();
+    if (!up.ok) return false;
+    const fd = new FormData();
+    fd.append("file", new Blob([bytes], { type: photo.mime || "application/octet-stream" }), photo.name);
+    await fetch(up.upload_url, { method: "POST", body: fd });
+    const done = await (await fetch("https://slack.com/api/files.completeUploadExternal", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${BOT_TOKEN}` },
+      body: JSON.stringify({ files: [{ id: up.file_id, title: photo.name }], channel_id: CHANNEL_ID, thread_ts: threadTs, initial_comment: comment }),
+    })).json();
+    return !!done.ok;
+  } catch (e) { console.error("photo upload failed", e); return false; }
 }
 
-// ── open the check-in modal (registered users): optional time/calories ──
-async function openCheckinModal(triggerId: string) {
-  const blocks: unknown[] = [
-    { type: "section", text: { type: "mrkdwn", text: "오늘 운동을 인증합니다 💪\n아래는 선택 입력이에요 (비워도 됩니다)." } },
-    ...metricBlocks(),
-  ];
-  await fetch("https://slack.com/api/views.open", {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${BOT_TOKEN}` },
-    body: JSON.stringify({
-      trigger_id: triggerId,
-      view: {
-        type: "modal", callback_id: "checkin",
-        title: { type: "plain_text", text: "운동 인증" },
-        submit: { type: "plain_text", text: "인증하기" },
-        close: { type: "plain_text", text: "취소" },
-        blocks,
-      },
-    }),
-  });
-}
+// ── post the check-in thread comment (rank by distinct days; optional photo) ──
+async function announceCheckin(nickname: string, duration: number | null, calories: number | null, todayCount: number, photo: { url: string; name: string; mime: string } | null) {
+  if (!CHANNEL_ID) return;
+  const date = todayKST();
+  const [, mm, dd] = date.split("-").map(Number);
+  const ym = date.slice(0, 7);
 
-// ── open the name-picker modal ──
-async function openModal(triggerId: string, names: string[]) {
-  const blocks: unknown[] = [{
-    type: "section",
-    text: { type: "mrkdwn", text: "처음이시네요! 💪\n사용할 이름을 정해주세요. 기존 기록이 있으면 목록에서 고르고, 새 멤버면 새 이름을 입력하세요." },
-  }];
-  if (names.length > 0) {
-    blocks.push({
-      type: "input", optional: true, block_id: "existing",
-      label: { type: "plain_text", text: "기존 이름에서 선택" },
-      element: {
-        type: "static_select", action_id: "sel",
-        placeholder: { type: "plain_text", text: "이름 선택" },
-        options: names.slice(0, 100).map((n) => ({ text: { type: "plain_text", text: n }, value: n })),
-      },
-    });
+  const counts = await monthlyDayCounts(ym);
+  const myAfter = counts[nickname] ?? 1;
+  const others = Object.entries(counts).filter(([n]) => n !== nickname).map(([, c]) => c);
+  const rankOf = (val: number) => 1 + others.filter((c) => c > val).length;
+  const afterRank = rankOf(myAfter);
+
+  let rankMsg: string;
+  if (todayCount > 1) {
+    rankMsg = `💪 오늘 ${todayCount}번째 운동! ${mm}월 현재 *${afterRank}위* · ${myAfter}일`;
+  } else {
+    const before = myAfter - 1;
+    if (before <= 0) rankMsg = `🎉 ${mm}월 첫 인증! 현재 *${afterRank}위*`;
+    else {
+      const br = rankOf(before);
+      rankMsg = afterRank < br ? `📈 ${mm}월 순위 *${br}위 → ${afterRank}위* 상승!` : `${mm}월 현재 *${afterRank}위* · ${myAfter}일`;
+    }
   }
-  blocks.push({
-    type: "input", optional: true, block_id: "newname",
-    label: { type: "plain_text", text: "새 이름 (신규 멤버)" },
-    element: { type: "plain_text_input", action_id: "txt", max_length: 20 },
-  });
-  blocks.push({
-    type: "input", block_id: "goal",
-    label: { type: "plain_text", text: "주당 목표 운동 일수" },
-    element: {
-      type: "static_select", action_id: "g",
-      placeholder: { type: "plain_text", text: "일수 선택" },
-      options: [1, 2, 3, 4, 5, 6, 7].map((n) => ({ text: { type: "plain_text", text: `주 ${n}일` }, value: String(n) })),
-    },
-  });
-  blocks.push(...metricBlocks());
 
-  await fetch("https://slack.com/api/views.open", {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${BOT_TOKEN}` },
-    body: JSON.stringify({
-      trigger_id: triggerId,
-      view: {
-        type: "modal", callback_id: "register_name",
-        title: { type: "plain_text", text: "운동 인증" },
-        submit: { type: "plain_text", text: "인증하기" },
-        close: { type: "plain_text", text: "취소" },
-        blocks,
-      },
-    }),
-  });
+  // ensure today's thread
+  let ts: string | null = null;
+  const { data: existing } = await supabase.from("daily_threads").select("thread_ts").eq("thread_date", date).eq("channel", CHANNEL_ID).maybeSingle();
+  if (existing) ts = existing.thread_ts;
+  else {
+    const parent = await slackPost({ channel: CHANNEL_ID, text: `*${mm}월 ${dd}일 운동 인증 스레드* 💪` });
+    if (parent?.ok && parent.ts) {
+      ts = parent.ts;
+      await supabase.from("daily_threads").insert({ thread_date: date, channel: CHANNEL_ID, thread_ts: ts });
+      const { data: canon } = await supabase.from("daily_threads").select("thread_ts").eq("thread_date", date).eq("channel", CHANNEL_ID).maybeSingle();
+      if (canon) ts = canon.thread_ts;
+    }
+  }
+  if (!ts) return;
+
+  const wp = await weeklyProgress(nickname);
+  const goalMsg = wp ? `\n🎯 이번주 목표 달성률 *${wp.pct}%* (${wp.count}/${wp.goal})` : "";
+  const header = todayCount > 1 ? `*${nickname}* 님이 오늘 운동을 추가로 인증했어요!` : `*${nickname}* 님이 오늘의 운동을 인증했어요!`;
+  const text = `${header}${metricSuffix(duration, calories)}\n${rankMsg}${goalMsg}`;
+
+  if (photo && await uploadPhotoToThread(ts, photo, text)) return; // photo + comment in one
+  await slackPost({ channel: CHANNEL_ID, thread_ts: ts, text }); // text only (no photo / upload failed)
 }
 
-// ── subcommand handling ──
+// ── DM conversation (Geekbot style) ──
+const Q = {
+  goal: "주당 목표 운동 *일수*를 숫자로 알려주세요 (1~7). 없으면 `skip`.",
+  duration: "오늘 운동 *시간(분)*을 숫자로 알려주세요. 없으면 `skip`.",
+  calories: "*소모 칼로리(kcal)*를 숫자로 알려주세요. 없으면 `skip`.",
+  photo: "마지막으로 *인증 사진*을 올려주세요 📸 (없으면 `skip`).",
+};
+const qName = (names: string[]) =>
+  `처음이시네요! 💪 사용할 *이름*을 입력해주세요.\n${names.length ? `기존 기록이 있으면 그 이름으로: ${names.join(", ")}\n` : ""}새 멤버면 새 이름을 적어주세요.`;
+
+const SKIP = new Set(["skip", "없음", "없어", "없어요", "패스", "pass", "x", "-", "."]);
+const isSkip = (t: string) => SKIP.has(t.trim().toLowerCase());
+const isCancel = (t: string) => ["취소", "cancel", "그만", "중단"].includes(t.trim().toLowerCase());
+
+async function setSession(uid: string, step: string, data: Record<string, unknown>) {
+  await supabase.from("checkin_sessions").upsert({ slack_user_id: uid, step, data, updated_at: new Date().toISOString() });
+}
+async function clearSession(uid: string) { await supabase.from("checkin_sessions").delete().eq("slack_user_id", uid); }
+
+async function startCheckin(uid: string) {
+  const member = await getMember(uid);
+  if (member) { await setSession(uid, "duration", {}); await dm(uid, Q.duration); }
+  else { await setSession(uid, "name", {}); await dm(uid, qName(await unclaimedNicknames())); }
+}
+
+async function finalize(uid: string, data: any, photo: { url: string; name: string; mime: string } | null) {
+  let member = await getMember(uid);
+  if (!member) {
+    await supabase.from("members").upsert({ slack_user_id: uid, nickname: data.name, weekly_goal: data.goal ?? null });
+    member = { nickname: data.name, weekly_goal: data.goal ?? null };
+  }
+  const dur = data.duration ?? null, cal = data.calories ?? null;
+  const todayCount = await recordCheckin(member.nickname, uid, dur, cal);
+  await announceCheckin(member.nickname, dur, cal, todayCount, photo);
+  await clearSession(uid);
+  const extra = todayCount > 1 ? ` (오늘 ${todayCount}번째)` : "";
+  await dm(uid, `오늘 운동 인증 완료! 🔥 (${member.nickname})${metricSuffix(dur, cal)}${extra}`);
+}
+
+async function handleDM(event: any) {
+  const uid = event.user;
+  const { data: session } = await supabase.from("checkin_sessions").select("*").eq("slack_user_id", uid).maybeSingle();
+  if (!session) return; // no active check-in conversation
+  const text = (event.text || "").trim();
+  if (isCancel(text)) { await clearSession(uid); await dm(uid, "인증을 취소했어요. 다시 하려면 `/운동 인증`."); return; }
+  const data = session.data || {};
+
+  switch (session.step) {
+    case "name": {
+      if (!text) { await dm(uid, "이름을 입력해주세요."); return; }
+      if (text.length > 20) { await dm(uid, "이름이 너무 길어요 (20자 이내)."); return; }
+      const { data: clash } = await supabase.from("members").select("slack_user_id").eq("nickname", text).maybeSingle();
+      if (clash && clash.slack_user_id !== uid) { await dm(uid, "이미 사용 중인 이름이에요. 다른 이름을 적어주세요."); return; }
+      data.name = text; await setSession(uid, "goal", data); await dm(uid, Q.goal); return;
+    }
+    case "goal": {
+      if (isSkip(text)) data.goal = null;
+      else { const g = parseInt(text.replace(/[^0-9]/g, ""), 10); if (!(g >= 1 && g <= 7)) { await dm(uid, "1~7 사이 숫자로 알려주세요. 없으면 `skip`."); return; } data.goal = g; }
+      await setSession(uid, "duration", data); await dm(uid, Q.duration); return;
+    }
+    case "duration": {
+      data.duration = isSkip(text) ? null : parseMetric(text, 1440);
+      await setSession(uid, "calories", data); await dm(uid, Q.calories); return;
+    }
+    case "calories": {
+      data.calories = isSkip(text) ? null : parseMetric(text, 10000);
+      await setSession(uid, "photo", data); await dm(uid, Q.photo); return;
+    }
+    case "photo": {
+      const img = (event.files || []).find((f: any) => (f.mimetype || "").startsWith("image/"));
+      if (img) { await finalize(uid, data, { url: img.url_private, name: img.name || "checkin.jpg", mime: img.mimetype }); return; }
+      if (isSkip(text)) { await finalize(uid, data, null); return; }
+      await dm(uid, "사진을 올리거나 `skip` 이라고 답해주세요."); return;
+    }
+  }
+}
+
+// ── slash subcommands ──
 async function handleCommand(params: URLSearchParams): Promise<Response> {
   const slackUserId = params.get("user_id")!;
-  const triggerId = params.get("trigger_id")!;
   const text = (params.get("text") ?? "").trim();
   const [sub, ...rest] = text.split(/\s+/).filter(Boolean);
-
   const member = await getMember(slackUserId);
 
-  // check-in: unregistered users get the registration modal, registered users get the check-in modal
-  if (sub === "인증") {
-    if (!member) await openModal(triggerId, await unclaimedNicknames());
-    else await openCheckinModal(triggerId);
-    return empty();
+  if (sub === "인증" || !sub || sub === "도움말") {
+    if (sub === "인증") { await startCheckin(slackUserId); return ephemeral("DM으로 인증을 진행해 주세요 👉 (운동봇과의 다이렉트 메시지 확인)"); }
+    return ephemeral(HELP);
   }
 
-  // commands other than check-in require registration
   if (["취소", "내기록", "이름변경", "목표설정"].includes(sub) && !member) {
     return ephemeral("먼저 `/운동 인증` 으로 등록해주세요. 🙂");
   }
 
   if (sub === "취소") {
-    const { data: del } = await supabase
-      .from("checkins").delete()
-      .eq("checkin_date", todayKST()).eq("nickname", member!.nickname).select();
+    const { data: del } = await supabase.from("checkins").delete().eq("checkin_date", todayKST()).eq("nickname", member!.nickname).select();
     const n = del?.length ?? 0;
-    return ephemeral(n
-      ? `오늘 인증을 취소했어요. (${n}건, ${member!.nickname})`
-      : "오늘은 인증 기록이 없어요.");
+    return ephemeral(n ? `오늘 인증을 취소했어요. (${n}건, ${member!.nickname})` : "오늘은 인증 기록이 없어요.");
   }
 
   if (sub === "내기록") {
-    const { data } = await supabase
-      .from("checkins").select("checkin_date,duration_min,calories").eq("nickname", member!.nickname);
+    const { data } = await supabase.from("checkins").select("checkin_date,duration_min,calories").eq("nickname", member!.nickname);
     const rows = data ?? [];
     const dates = rows.map((r) => r.checkin_date as string);
     const ym = thisMonthKST();
@@ -367,16 +304,13 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
     const moName = MONTH_NAMES[Number(ym.slice(5, 7)) - 1];
     const wp = await weeklyProgress(member!.nickname);
     const goalLine = wp ? `\n• 이번주 목표: *${wp.count}/${wp.goal}일* (달성률 ${wp.pct}%)` : "";
-    const metricLine = (sumMin || sumKcal)
-      ? `\n• ${moName} 운동시간: *${sumMin}분* · 칼로리: *${sumKcal}kcal*` : "";
-    return ephemeral(
-      `*${member!.nickname}님의 기록* 📊\n• ${moName} 운동: *${monthDays}일* (${monthRows.length}회)\n• 최장 연속: *${streak}일*\n• 전체 누적: *${totalDays}일*${metricLine}${goalLine}`,
-    );
+    const metricLine = (sumMin || sumKcal) ? `\n• ${moName} 운동시간: *${sumMin}분* · 칼로리: *${sumKcal}kcal*` : "";
+    return ephemeral(`*${member!.nickname}님의 기록* 📊\n• ${moName} 운동: *${monthDays}일* (${monthRows.length}회)\n• 최장 연속: *${streak}일*\n• 전체 누적: *${totalDays}일*${metricLine}${goalLine}`);
   }
 
   if (sub === "순위") {
     const ym = thisMonthKST();
-    const counts = await monthlyDayCounts(ym); // distinct workout days
+    const counts = await monthlyDayCounts(ym);
     const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10);
     if (!ranked.length) return ephemeral("이번달 인증 기록이 아직 없어요.");
     const medals = ["🥇", "🥈", "🥉"];
@@ -389,11 +323,8 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
     const newName = rest.join(" ").trim();
     if (!newName) return ephemeral("바꿀 이름을 입력해주세요. 예: `/운동 이름변경 병철`");
     if (newName.length > 20) return ephemeral("이름이 너무 길어요 (20자 이내).");
-    const { data: clash } = await supabase
-      .from("members").select("slack_user_id").eq("nickname", newName).maybeSingle();
-    if (clash && clash.slack_user_id !== slackUserId) {
-      return ephemeral("이미 사용 중인 이름이에요. 다른 이름을 써주세요.");
-    }
+    const { data: clash } = await supabase.from("members").select("slack_user_id").eq("nickname", newName).maybeSingle();
+    if (clash && clash.slack_user_id !== slackUserId) return ephemeral("이미 사용 중인 이름이에요. 다른 이름을 써주세요.");
     const old = member!.nickname;
     await supabase.from("members").update({ nickname: newName }).eq("slack_user_id", slackUserId);
     await supabase.from("checkins").update({ nickname: newName }).eq("nickname", old);
@@ -402,9 +333,7 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
 
   if (sub === "목표설정") {
     if (!rest[0]) {
-      return ephemeral(member!.weekly_goal
-        ? `현재 주간 목표: *${member!.weekly_goal}일*\n변경하려면 \`/운동 목표설정 5\``
-        : "주간 목표가 없어요. 설정하려면 `/운동 목표설정 5`");
+      return ephemeral(member!.weekly_goal ? `현재 주간 목표: *${member!.weekly_goal}일*\n변경하려면 \`/운동 목표설정 5\`` : "주간 목표가 없어요. 설정하려면 `/운동 목표설정 5`");
     }
     const n = parseInt(rest[0], 10);
     if (isNaN(n) || n < 1 || n > 7) return ephemeral("1~7 사이 숫자로 입력해주세요. 예: `/운동 목표설정 5`");
@@ -412,67 +341,14 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
     return ephemeral(`주간 목표 *${n}일* 설정 완료! 💪`);
   }
 
-  // empty input / help / unknown command
   return ephemeral(HELP);
 }
 
-// read optional metrics from a modal's state
-function readMetrics(vals: any) {
-  return {
-    duration: parseMetric(vals.duration?.v?.value, 1440),
-    calories: parseMetric(vals.calories?.v?.value, 10000),
-  };
-}
-
-// ── registration modal submission (first-time user) ──
-async function handleRegisterSubmit(payload: any): Promise<Response> {
-  const slackUserId = payload.user.id;
-  const slackName = payload.user.username ?? payload.user.name ?? "";
-  const vals = payload.view.state.values;
-  const typed = vals.newname?.txt?.value?.trim();
-  const picked = vals.existing?.sel?.selected_option?.value;
-  const nickname = typed || picked;
-  const goalVal = vals.goal?.g?.selected_option?.value;
-  const weekly_goal = goalVal ? parseInt(goalVal, 10) : null;
-  const { duration, calories } = readMetrics(vals);
-
-  if (!nickname) {
-    return json({ response_action: "errors", errors: { newname: "이름을 선택하거나 입력해주세요." } });
-  }
-  const { data: clash } = await supabase
-    .from("members").select("slack_user_id").eq("nickname", nickname).maybeSingle();
-  if (clash && clash.slack_user_id !== slackUserId) {
-    return json({ response_action: "errors", errors: { newname: "이미 사용 중인 이름이에요. 다른 이름을 써주세요." } });
-  }
-
-  const { error: upErr } = await supabase
-    .from("members").upsert({ slack_user_id: slackUserId, slack_name: slackName, nickname, weekly_goal });
-  if (upErr) {
-    return json({ response_action: "errors", errors: { newname: "등록 중 오류가 났어요. 다시 시도해주세요." } });
-  }
-
-  const todayCount = await recordCheckin(nickname, slackUserId, duration, calories);
-  await announceBg(nickname, duration, calories, todayCount);
-  const goalNote = weekly_goal ? ` (주간 목표 ${weekly_goal}일)` : "";
-  await slackPost({ channel: slackUserId, text: `'${nickname}' 이름으로 등록하고 오늘 인증 완료! 🔥${metricSuffix(duration, calories)}${goalNote}` });
-  return empty();
-}
-
-// ── check-in modal submission (registered user) ──
-async function handleCheckinSubmit(payload: any): Promise<Response> {
-  const slackUserId = payload.user.id;
-  const member = await getMember(slackUserId);
-  if (!member) {
-    return json({ response_action: "errors", errors: { duration: "먼저 `/운동 인증` 으로 등록해주세요." } });
-  }
-  const { duration, calories } = readMetrics(payload.view.state.values);
-  const todayCount = await recordCheckin(member.nickname, slackUserId, duration, calories);
-  await announceBg(member.nickname, duration, calories, todayCount);
-  const msg = todayCount > 1
-    ? `오늘 ${todayCount}번째 운동 인증 완료! 💪 (${member.nickname})${metricSuffix(duration, calories)}`
-    : `오늘 운동 인증 완료! 🔥 (${member.nickname})${metricSuffix(duration, calories)}`;
-  await slackPost({ channel: slackUserId, text: msg });
-  return empty();
+// run work in the background so we can ACK Slack within 3s
+function bg(p: Promise<unknown>) {
+  const ed = (globalThis as any).EdgeRuntime;
+  if (ed?.waitUntil) ed.waitUntil(p.catch((e) => console.error(e)));
+  return ed?.waitUntil ? Promise.resolve() : p.catch((e) => console.error(e));
 }
 
 Deno.serve(async (req) => {
@@ -480,18 +356,25 @@ Deno.serve(async (req) => {
   const rawBody = await req.text();
   if (!(await verifySlack(req, rawBody))) return new Response("invalid signature", { status: 401 });
 
-  const params = new URLSearchParams(rawBody);
-  const payloadStr = params.get("payload");
-  try {
-    if (payloadStr) {
-      const payload = JSON.parse(payloadStr);
-      if (payload.type === "view_submission") {
-        return payload.view?.callback_id === "checkin"
-          ? await handleCheckinSubmit(payload)
-          : await handleRegisterSubmit(payload);
+  const ct = req.headers.get("content-type") || "";
+  // Events API (DM conversation) — JSON body
+  if (ct.includes("application/json")) {
+    const body = JSON.parse(rawBody);
+    if (body.type === "url_verification") return new Response(body.challenge, { status: 200 });
+    if (req.headers.get("x-slack-retry-num")) return empty(); // already ACKed; skip retries
+    if (body.type === "event_callback") {
+      const ev = body.event;
+      if (ev?.type === "message" && ev.channel_type === "im" && !ev.bot_id && ev.user && (ev.text !== undefined || ev.files)) {
+        await bg(handleDM(ev));
       }
       return empty();
     }
+    return empty();
+  }
+
+  // Slash commands — form-encoded
+  try {
+    const params = new URLSearchParams(rawBody);
     if (params.get("command")) return await handleCommand(params);
     return empty();
   } catch (e) {

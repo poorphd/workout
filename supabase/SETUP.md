@@ -39,12 +39,16 @@ After deploying, the function URL is:
    - Command: `/운동` (if Slack rejects it, use `/workout` — the code is command-name agnostic)
    - Request URL: `https://<ref>.supabase.co/functions/v1/slack`
    - Save
-3. **Interactivity & Shortcuts → On**
-   - Request URL: the same function URL
+3. **Event Subscriptions → On** (for the DM conversation)
+   - Request URL: the same function URL (Slack will verify it instantly)
+   - **Subscribe to bot events** → add `message.im` → Save
 4. **OAuth & Permissions → Scopes → Bot Token Scopes** — add:
    - `commands`
    - `chat:write`
    - `channels:history` (needed by the message-cleanup scripts)
+   - `im:history` (read the user's DM replies — for the conversational check-in)
+   - `files:read` (download the photo a user sends in DM)
+   - `files:write` (re-upload the photo into the channel thread)
 5. **App Home** → set a Bot Display Name + username (creates the bot user)
 6. **Install to Workspace**
    - Installs immediately, or shows "request admin approval" → ask a workspace admin
@@ -61,6 +65,7 @@ After deploying, the function URL is:
 - Add the weekly-goal column: run `supabase/add_goal.sql`
 - Add the optional workout metric columns: run `supabase/add_metrics.sql`
 - Allow multiple check-ins per day: run `supabase/add_multi.sql`
+- Add the DM conversation state table: run `supabase/add_sessions.sql`
 
 ## 4. Set the Edge Function secrets
 
@@ -81,7 +86,7 @@ Use the subcommands in any Slack channel:
 
 | Input | Action |
 |-------|--------|
-| `/운동 인증` | Check in for today (first-time users get a name-picker modal) |
+| `/운동 인증` | Start a DM conversation: bot asks duration / calories / photo, then posts to the channel |
 | `/운동 취소` | Cancel today's check-in |
 | `/운동 내기록` | Your monthly count / longest streak |
 | `/운동 순위` | This month's leaderboard |
@@ -89,8 +94,8 @@ Use the subcommands in any Slack channel:
 | `/운동 목표설정 <n>` | Set weekly goal (achievement % shown on check-in) |
 | `/운동` or `/운동 도움말` | Help |
 
-- `/운동 인증` opens a modal with optional **운동 시간(분) / 소모 칼로리(kcal)** fields (leave blank to skip)
-- **First-time user**: the modal also asks for a name (pick existing or enter new) + weekly goal
+- `/운동 인증` starts a **DM conversation**: the bot asks **운동 시간(분) → 칼로리 → 사진** one at a time (answer `skip` to skip). First-time users are also asked for a name + weekly goal. On finish the bot posts the day's thread comment (rank + goal + photo) to the channel.
+- The photo a user uploads in DM is re-uploaded into the channel thread (not stored in the DB).
 - **Multiple check-ins per day are allowed** — each is its own session
 - **Ranking / weekly goal / streak count distinct workout days**, not the number of check-ins
 

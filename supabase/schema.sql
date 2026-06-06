@@ -52,3 +52,12 @@ create table if not exists daily_threads (
   primary key (thread_date, channel)
 );
 alter table daily_threads enable row level security; -- no policy = service_role only
+
+-- ── DM conversation state for the check-in flow ──
+create table if not exists checkin_sessions (
+  slack_user_id text primary key,
+  step          text not null,
+  data          jsonb not null default '{}'::jsonb,
+  updated_at    timestamptz not null default now()
+);
+alter table checkin_sessions enable row level security; -- no policy = service_role only
