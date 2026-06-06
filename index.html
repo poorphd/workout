@@ -18,6 +18,9 @@
     --l0: #21262d;
     --green: #39d353;
     --green-d: #006d32;
+    --g1: #2ea043;   /* 1 session */
+    --g2: #39d353;   /* 2 sessions */
+    --g3: #7ee787;   /* 3+ sessions */
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -66,18 +69,23 @@
   table.heat th.day { font-size: 9px; color: var(--muted); font-weight: 500; padding-bottom: 5px; }
   table.heat td.name-cell { text-align: right; padding-right: 8px; font-size: 12px; font-weight: 700; white-space: nowrap; }
   .cell { width: 15px; height: 15px; border-radius: 3px; background: var(--l0); display: inline-block; }
-  .cell.on { background: var(--green); }
-  .cell.multi { background: var(--green); box-shadow: inset 0 0 0 1.5px #0d1117, 0 0 0 1.5px var(--green); }
+  .cell.l1 { background: var(--g1); }
+  .cell.l2 { background: var(--g2); }
+  .cell.l3 { background: var(--g3); }
   table.heat td { padding: 0; }
   .cell-wrap { padding: 1.5px; }
   .total-cell { font-size: 11px; color: var(--muted); padding-left: 8px; font-weight: 700; white-space: nowrap; }
 
-  /* streaks */
-  .grid-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
-  .scard { background: var(--l0); border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; align-items: center; gap: 10px; }
-  .scard .ic { font-size: 22px; }
-  .scard .sname { font-weight: 700; font-size: 14px; }
-  .scard .sval { font-size: 11px; color: var(--muted); }
+  /* top-3 hall of fame */
+  .t3-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+  .t3-card { background: var(--l0); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .t3-title { font-size: 12px; color: var(--muted); font-weight: 700; margin-bottom: 8px; }
+  .t3-row { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 4px; }
+  .t3-row:last-child { margin-bottom: 0; }
+  .t3-medal { width: 18px; text-align: center; flex-shrink: 0; }
+  .t3-name { font-weight: 700; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .t3-val { color: var(--accent); font-weight: 700; font-size: 12px; flex-shrink: 0; }
+  .t3-empty { font-size: 12px; color: var(--muted); }
 
   /* weekly goals */
   .goal-row { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
@@ -130,6 +138,7 @@ const SUPA_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIs
 let MONTHS = [];          // ascending
 const DATA = {};          // month -> { "YYYY-MM-DD": [ {name, dur, cal} ] }
 const ALLDATES = {};      // name -> Set of "YYYY-MM-DD" (all time)
+const STATS = {};         // name -> { sessions, min, cal } (all time)
 const GOALS = {};         // name -> weekly_goal
 let CUR_MONTH = null;
 
@@ -158,10 +167,11 @@ async function loadData() {
   for (const r of checkins) {
     const date = r.checkin_date, month = date.slice(0, 7);
     (DATA[month] = DATA[month] || {});
-    (DATA[month][date] = DATA[month][date] || []).push({
-      name: r.nickname, dur: r.duration_min ?? 0, cal: r.calories ?? 0,
-    });
+    const dur = r.duration_min ?? 0, cal = r.calories ?? 0;
+    (DATA[month][date] = DATA[month][date] || []).push({ name: r.nickname, dur, cal });
     (ALLDATES[r.nickname] = ALLDATES[r.nickname] || new Set()).add(date);
+    const s = (STATS[r.nickname] = STATS[r.nickname] || { sessions: 0, min: 0, cal: 0 });
+    s.sessions++; s.min += dur; s.cal += cal;
   }
   for (const m of members) if (m.weekly_goal) GOALS[m.nickname] = m.weekly_goal;
   MONTHS = Object.keys(DATA).sort();
@@ -180,7 +190,25 @@ function allTimeStreak(name) {
   }
   return { len: best, start: bs, end: be };
 }
-const md = (s) => { const [, m, d] = s.split("-").map(Number); return `${m}/${d}`; };
+
+// longest consecutive-day run within a single month (byDay: {dayNum: count})
+function streakFromDays(byDay) {
+  const days = Object.keys(byDay).map(Number).sort((a, b) => a - b);
+  if (!days.length) return 0;
+  let best = 1, cur = 1;
+  for (let i = 1; i < days.length; i++) { cur = days[i] === days[i - 1] + 1 ? cur + 1 : 1; if (cur > best) best = cur; }
+  return best;
+}
+
+// one TOP-3 card. entries: [{n, v}] (unsorted); fmt formats the value
+function top3Card(title, entries, fmt) {
+  const arr = entries.filter((x) => x.v > 0).sort((a, b) => b.v - a.v || a.n.localeCompare(b.n)).slice(0, 3);
+  const medals = ["🥇", "🥈", "🥉"];
+  const body = arr.length
+    ? arr.map((x, i) => `<div class="t3-row"><span class="t3-medal">${medals[i]}</span><span class="t3-name">${x.n}</span><span class="t3-val">${fmt(x.v)}</span></div>`).join("")
+    : `<div class="t3-empty">아직 기록 없음</div>`;
+  return `<div class="t3-card"><div class="t3-title">${title}</div>${body}</div>`;
+}
 
 // dates of the current week (Mon..Sun)
 function thisWeekDates() {
@@ -203,19 +231,19 @@ function render(monthKey) {
     return;
   }
 
-  // per-person aggregation for the month
-  const P = {}; // name -> {days:Set, sessions, min, cal}
+  // per-person aggregation for the month (byDay: day -> session count)
+  const P = {};
   let totMin = 0, totCal = 0, totSessions = 0;
   for (const d of dates) {
     const day = Number(d.slice(8, 10));
     for (const r of data[d]) {
-      const p = (P[r.name] = P[r.name] || { days: new Set(), sessions: 0, min: 0, cal: 0 });
-      p.days.add(day); p.sessions++; p.min += r.dur; p.cal += r.cal;
+      const p = (P[r.name] = P[r.name] || { byDay: {}, sessions: 0, min: 0, cal: 0 });
+      p.byDay[day] = (p.byDay[day] || 0) + 1; p.sessions++; p.min += r.dur; p.cal += r.cal;
       totMin += r.dur; totCal += r.cal; totSessions++;
     }
   }
   const ranked = Object.entries(P)
-    .map(([name, v]) => ({ name, days: v.days.size, sessions: v.sessions, min: v.min, cal: v.cal, set: v.days }))
+    .map(([name, v]) => ({ name, days: Object.keys(v.byDay).length, sessions: v.sessions, min: v.min, cal: v.cal, byDay: v.byDay }))
     .sort((a, b) => b.days - a.days || a.name.localeCompare(b.name));
   const maxDays = ranked[0].days;
 
@@ -252,20 +280,32 @@ function render(monthKey) {
   const head = "<tr><th></th>" + allDays.map((d) => `<th class="day">${d}</th>`).join("") + "<th></th></tr>";
   const rows = ranked.map((r) => {
     const cells = allDays.map((d) => {
-      const cls = r.set.has(d) ? " on" : "";
-      return `<td><div class="cell-wrap"><div class="cell${cls}"></div></div></td>`;
+      const c = r.byDay[d] || 0;
+      const cls = c >= 3 ? " l3" : c === 2 ? " l2" : c === 1 ? " l1" : "";
+      const title = c ? ` title="${month}/${d} · ${c}회"` : "";
+      return `<td><div class="cell-wrap"><div class="cell${cls}"${title}></div></div></td>`;
     }).join("");
     return `<tr><td class="name-cell">${r.name}</td>${cells}<td class="total-cell">${r.days}일</td></tr>`;
   }).join("");
 
-  // streaks (all-time)
-  const streaks = ranked.map((r) => ({ name: r.name, ...allTimeStreak(r.name) }))
-    .sort((a, b) => b.len - a.len || a.name.localeCompare(b.name));
-  const streakCards = streaks.map((s) => {
-    const ic = s.len >= 7 ? "🔥🔥" : s.len >= 3 ? "🔥" : "✨";
-    const range = s.len > 1 ? `${md(s.start)}~${md(s.end)}` : md(s.start);
-    return `<div class="scard"><div class="ic">${ic}</div><div><div class="sname">${s.name}</div><div class="sval">최장 ${s.len}일 · ${range}</div></div></div>`;
-  }).join("");
+  // this-month TOP 3 (from the month aggregation)
+  const monthCards = [
+    ["📅 인증 일수", ranked.map((r) => ({ n: r.name, v: r.days })), (v) => `${v}일`],
+    ["✅ 인증 횟수", ranked.map((r) => ({ n: r.name, v: r.sessions })), (v) => `${v}회`],
+    ["⏱️ 운동시간", ranked.map((r) => ({ n: r.name, v: r.min })), (v) => fmtDur(v)],
+    ["🔥 칼로리", ranked.map((r) => ({ n: r.name, v: r.cal })), (v) => `${comma(v)}kcal`],
+    ["⚡ 최장 스트릭", ranked.map((r) => ({ n: r.name, v: streakFromDays(r.byDay) })), (v) => `${v}일`],
+  ].map(([t, e, f]) => top3Card(t, e, f)).join("");
+
+  // all-time TOP 3 hall of fame
+  const allNames = Object.keys(STATS);
+  const allCards = [
+    ["📅 인증 일수", allNames.map((n) => ({ n, v: ALLDATES[n]?.size || 0 })), (v) => `${v}일`],
+    ["✅ 인증 횟수", allNames.map((n) => ({ n, v: STATS[n].sessions })), (v) => `${v}회`],
+    ["⏱️ 누적 운동시간", allNames.map((n) => ({ n, v: STATS[n].min })), (v) => fmtDur(v)],
+    ["🔥 누적 칼로리", allNames.map((n) => ({ n, v: STATS[n].cal })), (v) => `${comma(v)}kcal`],
+    ["⚡ 최장 스트릭", allNames.map((n) => ({ n, v: allTimeStreak(n).len })), (v) => `${v}일`],
+  ].map(([t, e, f]) => top3Card(t, e, f)).join("");
 
   // weekly goals (current week, independent of selected month)
   const week = thisWeekDates();
@@ -288,6 +328,7 @@ function render(monthKey) {
 
   content.innerHTML = `
     <div class="stats">${stats}</div>
+    <section><h2>🥇 ${MONTH_NAMES[month - 1]} TOP 3</h2><div class="t3-grid">${monthCards}</div></section>
     <section><h2>🏆 리더보드 <span class="sub">운동 일수 기준</span></h2>${lb}</section>
     <section>
       <h2>🎯 이번주 목표 현황 <span class="sub">월~일</span></h2>${goalsHtml}
@@ -295,9 +336,9 @@ function render(monthKey) {
     <section>
       <h2>🟩 인증 잔디 <span class="sub">사람 × 날짜</span></h2>
       <div class="heat-scroll"><table class="heat">${head}${rows}</table></div>
-      <div class="legend"><span>안 함</span><span class="cell"></span><span class="cell on"></span><span>운동</span></div>
+      <div class="legend"><span>적게</span><span class="cell"></span><span class="cell l1"></span><span class="cell l2"></span><span class="cell l3"></span><span>여러 번</span></div>
     </section>
-    <section><h2>🔥 최장 연속 스트릭 <span class="sub">전체 기간</span></h2><div class="grid-cards">${streakCards}</div></section>`;
+    <section><h2>🏅 명예의 전당 <span class="sub">전체 기간 TOP 3</span></h2><div class="t3-grid">${allCards}</div></section>`;
 }
 
 async function init() {
