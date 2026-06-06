@@ -66,6 +66,7 @@ After deploying, the function URL is:
 - Add the optional workout metric columns: run `supabase/add_metrics.sql`
 - Allow multiple check-ins per day: run `supabase/add_multi.sql`
 - Add the DM conversation state table: run `supabase/add_sessions.sql`
+- Add the workout-type column: run `supabase/add_workout.sql`
 
 ## 4. Set the Edge Function secrets
 
@@ -94,7 +95,7 @@ Use the subcommands in any Slack channel:
 | `/운동 목표설정 <n>` | Set weekly goal (achievement % shown on check-in) |
 | `/운동` or `/운동 도움말` | Help |
 
-- `/운동 인증` starts a **DM conversation**: the bot asks **운동 시간(분) → 칼로리 → 사진** one at a time (answer `skip` to skip). First-time users are also asked for a name + weekly goal. On finish the bot posts the day's thread comment (rank + goal + photo) to the channel.
+- `/운동 인증` starts a **DM conversation**: the bot asks **운동 종류 → 시간(분) → 칼로리 → 사진** one at a time (answer `skip` to skip). First-time users are also asked for a name + weekly goal. On finish the bot posts the day's thread comment (rank + goal + photo) to the channel.
 - The photo a user uploads in DM is re-uploaded into the channel thread (not stored in the DB).
 - **Multiple check-ins per day are allowed** — each is its own session
 - **Ranking / weekly goal / streak count distinct workout days**, not the number of check-ins

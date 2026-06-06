@@ -65,10 +65,11 @@ function parseMetric(v: string | undefined, max: number): number | null {
   const n = parseInt((v ?? "").replace(/[^0-9]/g, ""), 10);
   return Number.isFinite(n) && n > 0 && n <= max ? n : null;
 }
-function metricSuffix(duration: number | null, calories: number | null): string {
+function detailSuffix(workout: string | null, duration: number | null, calories: number | null): string {
   const parts: string[] = [];
-  if (duration != null) parts.push(`${duration}분`);
-  if (calories != null) parts.push(`${calories}kcal`);
+  if (workout) parts.push(`🏋️ ${workout}`);
+  if (duration != null) parts.push(`⏱️ ${duration}분`);
+  if (calories != null) parts.push(`🔥 ${calories}kcal`);
   return parts.length ? " · " + parts.join(" · ") : "";
 }
 function longestStreak(dates: string[]): number {
@@ -88,8 +89,8 @@ async function slackPost(body: Record<string, unknown>): Promise<any> {
 }
 const dm = (uid: string, text: string) => slackPost({ channel: uid, text });
 
-async function recordCheckin(nickname: string, slackUserId: string, duration: number | null, calories: number | null): Promise<number> {
-  const { error } = await supabase.from("checkins").insert({ checkin_date: todayKST(), nickname, slack_user_id: slackUserId, duration_min: duration, calories });
+async function recordCheckin(nickname: string, slackUserId: string, workout: string | null, duration: number | null, calories: number | null): Promise<number> {
+  const { error } = await supabase.from("checkins").insert({ checkin_date: todayKST(), nickname, slack_user_id: slackUserId, workout, duration_min: duration, calories });
   if (error) throw error;
   const { count } = await supabase.from("checkins").select("*", { count: "exact", head: true }).eq("checkin_date", todayKST()).eq("nickname", nickname);
   return count ?? 1;
@@ -143,7 +144,7 @@ async function uploadPhotoToThread(threadTs: string, photo: { url: string; name:
 }
 
 // ── post the check-in thread comment (rank by distinct days; optional photo) ──
-async function announceCheckin(nickname: string, duration: number | null, calories: number | null, todayCount: number, photo: { url: string; name: string; mime: string } | null) {
+async function announceCheckin(nickname: string, workout: string | null, duration: number | null, calories: number | null, todayCount: number, photo: { url: string; name: string; mime: string } | null) {
   if (!CHANNEL_ID) return;
   const date = todayKST();
   const [, mm, dd] = date.split("-").map(Number);
@@ -185,7 +186,7 @@ async function announceCheckin(nickname: string, duration: number | null, calori
   const wp = await weeklyProgress(nickname);
   const goalMsg = wp ? `\n🎯 이번주 목표 달성률 *${wp.pct}%* (${wp.count}/${wp.goal})` : "";
   const header = todayCount > 1 ? `*${nickname}* 님이 오늘 운동을 추가로 인증했어요!` : `*${nickname}* 님이 오늘의 운동을 인증했어요!`;
-  const text = `${header}${metricSuffix(duration, calories)}\n${rankMsg}${goalMsg}`;
+  const text = `${header}${detailSuffix(workout, duration, calories)}\n${rankMsg}${goalMsg}`;
 
   if (photo && await uploadPhotoToThread(ts, photo, text)) return; // photo + comment in one
   await slackPost({ channel: CHANNEL_ID, thread_ts: ts, text }); // text only (no photo / upload failed)
@@ -194,6 +195,7 @@ async function announceCheckin(nickname: string, duration: number | null, calori
 // ── DM conversation (Geekbot style) ──
 const Q = {
   goal: "주당 목표 운동 *일수*를 숫자로 알려주세요 (1~7). 없으면 `skip`.",
+  workout: "*어떤 운동*을 했나요? (예: 헬스, 러닝, 수영) 없으면 `skip`.",
   duration: "오늘 운동 *시간(분)*을 숫자로 알려주세요. 없으면 `skip`.",
   calories: "*소모 칼로리(kcal)*를 숫자로 알려주세요. 없으면 `skip`.",
   photo: "마지막으로 *인증 사진*을 올려주세요 📸 (없으면 `skip`).",
@@ -212,7 +214,7 @@ async function clearSession(uid: string) { await supabase.from("checkin_sessions
 
 async function startCheckin(uid: string) {
   const member = await getMember(uid);
-  if (member) { await setSession(uid, "duration", {}); await dm(uid, Q.duration); }
+  if (member) { await setSession(uid, "workout", {}); await dm(uid, Q.workout); }
   else { await setSession(uid, "name", {}); await dm(uid, qName(await unclaimedNicknames())); }
 }
 
@@ -222,12 +224,12 @@ async function finalize(uid: string, data: any, photo: { url: string; name: stri
     await supabase.from("members").upsert({ slack_user_id: uid, nickname: data.name, weekly_goal: data.goal ?? null });
     member = { nickname: data.name, weekly_goal: data.goal ?? null };
   }
-  const dur = data.duration ?? null, cal = data.calories ?? null;
-  const todayCount = await recordCheckin(member.nickname, uid, dur, cal);
-  await announceCheckin(member.nickname, dur, cal, todayCount, photo);
+  const workout = data.workout ?? null, dur = data.duration ?? null, cal = data.calories ?? null;
+  const todayCount = await recordCheckin(member.nickname, uid, workout, dur, cal);
+  await announceCheckin(member.nickname, workout, dur, cal, todayCount, photo);
   await clearSession(uid);
   const extra = todayCount > 1 ? ` (오늘 ${todayCount}번째)` : "";
-  await dm(uid, `오늘 운동 인증 완료! 🔥 (${member.nickname})${metricSuffix(dur, cal)}${extra}`);
+  await dm(uid, `오늘 운동 인증 완료! 🔥 (${member.nickname})${detailSuffix(workout, dur, cal)}${extra}`);
 }
 
 async function handleDM(event: any) {
@@ -249,6 +251,10 @@ async function handleDM(event: any) {
     case "goal": {
       if (isSkip(text)) data.goal = null;
       else { const g = parseInt(text.replace(/[^0-9]/g, ""), 10); if (!(g >= 1 && g <= 7)) { await dm(uid, "1~7 사이 숫자로 알려주세요. 없으면 `skip`."); return; } data.goal = g; }
+      await setSession(uid, "workout", data); await dm(uid, Q.workout); return;
+    }
+    case "workout": {
+      data.workout = isSkip(text) ? null : text.slice(0, 40);
       await setSession(uid, "duration", data); await dm(uid, Q.duration); return;
     }
     case "duration": {
