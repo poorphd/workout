@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>💪 운동 인증 현황</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --gold: #f1c40f;
+    --silver: #c0c4cc;
+    --bronze: #cd7f32;
+    --l0: #21262d;
+    --l4: #39d353;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 32px 16px 64px;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 24px; }
+  header h1 { font-size: 28px; margin-bottom: 6px; }
+  header p { color: var(--muted); font-size: 14px; }
+
+  .monthbar { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 28px; }
+  .monthbar label { font-size: 13px; color: var(--muted); }
+  select.msel {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 32px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; text-align: center; }
+  .stat .num { font-size: 28px; font-weight: 700; color: var(--accent); }
+  .stat .lbl { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 22px; margin-bottom: 24px; }
+  section h2 { font-size: 18px; margin-bottom: 18px; }
+
+  /* leaderboard */
+  .row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .rank { width: 28px; text-align: center; font-weight: 700; font-size: 15px; color: var(--muted); flex-shrink: 0; }
+  .rank.r1 { color: var(--gold); } .rank.r2 { color: var(--silver); } .rank.r3 { color: var(--bronze); }
+  .name { width: 64px; flex-shrink: 0; font-weight: 600; font-size: 14px; }
+  .name.clickable { cursor: pointer; }
+  .name.clickable:hover { color: var(--accent); text-decoration: underline; }
+  .bar-wrap { flex: 1; background: var(--l0); border-radius: 6px; overflow: hidden; height: 26px; position: relative; }
+  .bar { height: 100%; background: linear-gradient(90deg, #006d32, #39d353); border-radius: 6px; display: flex; align-items: center; justify-content: flex-end; padding-right: 8px; min-width: 26px; transition: width .8s ease; }
+  .bar span { font-size: 12px; font-weight: 700; color: #fff; }
+
+  /* heatmap */
+  .heat-scroll { overflow-x: auto; }
+  table.heat { border-collapse: collapse; }
+  table.heat th, table.heat td { text-align: center; }
+  table.heat th.day { font-size: 10px; color: var(--muted); font-weight: 500; width: 20px; padding-bottom: 6px; }
+  table.heat td.name-cell { text-align: right; padding-right: 10px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .cell { width: 18px; height: 18px; border-radius: 4px; background: var(--l0); margin: 2px; display: inline-block; }
+  .cell.on { background: var(--l4); }
+  table.heat td { padding: 0; }
+  .cell-wrap { padding: 1px; }
+  .total-cell { font-size: 12px; color: var(--muted); padding-left: 10px; font-weight: 600; }
+
+  /* streak */
+  .streaks { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+  .streak-card { background: var(--l0); border: 1px solid var(--border); border-radius: 10px; padding: 14px; display: flex; align-items: center; gap: 12px; }
+  .streak-fire { font-size: 24px; }
+  .streak-card .sname { font-weight: 700; font-size: 14px; }
+  .streak-card .sval { font-size: 12px; color: var(--muted); }
+
+  /* personal */
+  .personal-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+  .personal-head h2 { margin: 0; }
+  .chips { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .chip { background: var(--l0); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; text-align: center; min-width: 96px; }
+  .chip .cn { font-size: 22px; font-weight: 700; color: var(--accent); }
+  .chip .cl { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .chart-block { margin-top: 18px; }
+  .chart-title { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .chartsvg { width: 100%; height: auto; display: block; }
+  .cval { fill: var(--text); font-size: 11px; font-weight: 700; }
+  .cx { fill: var(--muted); font-size: 10px; }
+  .cbase { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 4; }
+  .chart-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+
+  .legend { display: flex; align-items: center; gap: 6px; justify-content: flex-end; font-size: 11px; color: var(--muted); margin-top: 14px; }
+  .legend .cell { width: 12px; height: 12px; margin: 0; }
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 32px; }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>💪 운동 인증 현황</h1>
+    <p id="subtitle"></p>
+  </header>
+
+  <div class="monthbar">
+    <label for="monthSelect">기간</label>
+    <select id="monthSelect" class="msel"></select>
+  </div>
+
+  <div id="content"></div>
+
+  <section id="personal" style="display:none">
+    <div class="personal-head">
+      <h2>📈 개인별 추세</h2>
+      <div><label for="userSelect" style="font-size:13px;color:var(--muted);margin-right:8px">사용자</label>
+      <select id="userSelect" class="msel"></select></div>
+    </div>
+    <div id="personalBody"></div>
+  </section>
+
+  <footer>매일 인증으로 잔디를 채워보세요 🌱</footer>
+</div>
+
+<script>
+const MONTH_NAMES = ["1월","2월","3월","4월","5월","6월","7월","8월","9월","10월","11월","12월"];
+
+// Supabase (anon key = public read-only, safe to expose)
+const SUPA_URL = "https://hfyjkvypmunvfkwhmhsv.supabase.co";
+const SUPA_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeWprdnlwbXVudmZrd2htaHN2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2NjE1MzAsImV4cCI6MjA5NjIzNzUzMH0.IqFj-YDjG2Rdup8hnefCZPYHn4ZMHm1tXT7Ovl_jVjI";
+
+let MONTHS = [];        // months, ascending
+const DATA = {};        // month -> { "YYYY-MM-DD": [names] }
+let CUR_MONTH = null;
+let CUR_USER = null;
+
+function daysInMonth(year, month) { return new Date(year, month, 0).getDate(); }
+
+// Load all check-ins from the Supabase checkins table → build DATA / MONTHS
+async function loadCheckins() {
+  const res = await fetch(
+    `${SUPA_URL}/rest/v1/checkins?select=checkin_date,nickname&order=checkin_date.asc`,
+    { headers: { apikey: SUPA_ANON, Authorization: `Bearer ${SUPA_ANON}` }, cache: "no-cache" },
+  );
+  if (!res.ok) throw new Error(`supabase ${res.status}`);
+  const rows = await res.json();
+  for (const r of rows) {
+    const date = r.checkin_date;          // 'YYYY-MM-DD'
+    const month = date.slice(0, 7);
+    (DATA[month] = DATA[month] || {});
+    (DATA[month][date] = DATA[month][date] || []).push(r.nickname);
+  }
+  MONTHS = Object.keys(DATA).sort();
+}
+
+// Longest all-time streak. {len, start, end} (start/end = YYYY-MM-DD)
+function allTimeStreak(user) {
+  const dates = [...userAllDates(user)].sort(); // string sort = chronological
+  if (!dates.length) return { len: 0, start: null, end: null };
+  const toTime = s => { const [y, m, d] = s.split("-").map(Number); return Date.UTC(y, m - 1, d); };
+  let bestLen = 1, bestStart = dates[0], bestEnd = dates[0];
+  let curLen = 1, curStart = dates[0], prev = dates[0];
+  for (let i = 1; i < dates.length; i++) {
+    const diff = (toTime(dates[i]) - toTime(prev)) / 86400000;
+    if (diff === 1) curLen++;
+    else { curLen = 1; curStart = dates[i]; }
+    if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; bestEnd = dates[i]; }
+    prev = dates[i];
+  }
+  return { len: bestLen, start: bestStart, end: bestEnd };
+}
+
+function fmtMD(s) { const [, m, d] = s.split("-").map(Number); return `${m}/${d}`; }
+
+// ===== Dashboard (selected month) =====
+function renderDashboard(monthKey) {
+  const [year, month] = monthKey.split("-").map(Number);
+  const totalDays = daysInMonth(year, month);
+  const content = document.getElementById("content");
+  const data = DATA[monthKey] || {};
+
+  document.getElementById("subtitle").textContent = `${year}년 ${MONTH_NAMES[month - 1]}`;
+
+  const dates = Object.keys(data).sort();
+  if (dates.length === 0) {
+    content.innerHTML = `<div class="empty">${MONTH_NAMES[month - 1]} 인증 기록이 아직 없어요.</div>`;
+    return;
+  }
+
+  const people = {};
+  for (const d of dates) {
+    const day = Number(d.slice(8, 10));
+    for (const p of data[d]) (people[p] = people[p] || new Set()).add(day);
+  }
+  const ranked = Object.entries(people)
+    .map(([name, set]) => ({ name, count: set.size, set }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  const maxCount = ranked[0].count;
+
+  // tied ranks (Olympic style)
+  let prevCount = null, rank = 0;
+  ranked.forEach((r, i) => {
+    if (r.count !== prevCount) { rank = i + 1; prevCount = r.count; }
+    r.rank = rank;
+  });
+
+  const totalCerts = dates.reduce((s, d) => s + data[d].length, 0);
+  const activeDays = dates.length;
+  const avgPerDay = (totalCerts / activeDays).toFixed(1);
+
+  const allDays = [];
+  for (let d = 1; d <= totalDays; d++) allDays.push(d);
+
+  const streaks = ranked.map(r => ({ name: r.name, ...allTimeStreak(r.name) }))
+    .sort((a, b) => b.len - a.len || a.name.localeCompare(b.name));
+
+  const statsHtml = [
+    [totalCerts, "총 인증 횟수"],
+    [ranked.length, "참여 인원"],
+    [activeDays, "운동한 날"],
+    [avgPerDay, "하루 평균 인증"],
+  ].map(([n, l]) => `<div class="stat"><div class="num">${n}</div><div class="lbl">${l}</div></div>`).join("");
+
+  const lbHtml = ranked.map((r) => {
+    const pct = (r.count / maxCount * 100).toFixed(1);
+    const rc = r.rank <= 3 ? `r${r.rank}` : "";
+    const medal = ["🥇", "🥈", "🥉"][r.rank - 1] || r.rank;
+    return `<div class="row">
+      <div class="rank ${rc}">${medal}</div>
+      <div class="name clickable" data-name="${r.name}">${r.name}</div>
+      <div class="bar-wrap"><div class="bar" style="width:${pct}%"><span>${r.count}</span></div></div>
+    </div>`;
+  }).join("");
+
+  const head = '<tr><th></th>' + allDays.map(d => `<th class="day">${d}</th>`).join("") + '<th></th></tr>';
+  const rows = ranked.map(r => {
+    const cells = allDays.map(d => {
+      const on = r.set.has(d) ? " on" : "";
+      return `<td><div class="cell-wrap"><div class="cell${on}"></div></div></td>`;
+    }).join("");
+    return `<tr><td class="name-cell">${r.name}</td>${cells}<td class="total-cell">${r.count}회</td></tr>`;
+  }).join("");
+
+  const streakHtml = streaks.map(s => {
+    const fire = s.len >= 7 ? "🔥🔥" : s.len >= 3 ? "🔥" : "✨";
+    const range = s.len > 1 ? `${fmtMD(s.start)}~${fmtMD(s.end)}` : fmtMD(s.start);
+    return `<div class="streak-card">
+      <div class="streak-fire">${fire}</div>
+      <div><div class="sname">${s.name}</div><div class="sval">최장 ${s.len}일 · ${range}</div></div>
+    </div>`;
+  }).join("");
+
+  content.innerHTML = `
+    <div class="stats">${statsHtml}</div>
+    <section><h2>🏆 리더보드</h2>${lbHtml}</section>
+    <section>
+      <h2>🟩 인증 잔디 (사람 × 날짜)</h2>
+      <div class="heat-scroll"><table class="heat">${head}${rows}</table></div>
+      <div class="legend"><span>안 함</span><span class="cell"></span><span class="cell on"></span><span>인증</span></div>
+    </section>
+    <section><h2>🔥 최장 연속 스트릭 (전체 기간)</h2><div class="streaks">${streakHtml}</div></section>`;
+
+  // click a leaderboard name → jump to that user's trend
+  content.querySelectorAll(".name.clickable").forEach(el => {
+    el.addEventListener("click", () => selectUser(el.dataset.name));
+  });
+}
+
+// ===== Per-user trends =====
+function userDaySet(user, monthKey) {
+  const data = DATA[monthKey] || {};
+  const set = new Set();
+  for (const d in data) if (data[d].includes(user)) set.add(Number(d.slice(8, 10)));
+  return set;
+}
+
+// all of a user's check-in dates (YYYY-MM-DD) — for windows that cross month boundaries
+function userAllDates(user) {
+  const set = new Set();
+  for (const m of MONTHS) {
+    const data = DATA[m] || {};
+    for (const d in data) if (data[d].includes(user)) set.add(d);
+  }
+  return set;
+}
+
+function fmtDate(dt) {
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+
+function userMonthly(user) {
+  return MONTHS.map(m => {
+    const data = DATA[m] || {};
+    let c = 0;
+    for (const d in data) if (data[d].includes(user)) c++;
+    return { label: MONTH_NAMES[Number(m.slice(5, 7)) - 1], value: c };
+  });
+}
+
+// Catmull-Rom spline → bezier. Starts with M at coords[0], returns C segments
+function smoothBody(p, yMin, yMax) {
+  const clamp = v => Math.max(yMin, Math.min(yMax, v));
+  let d = "";
+  for (let i = 0; i < p.length - 1; i++) {
+    const p0 = p[i - 1] || p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] || p2;
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = clamp(p1[1] + (p2[1] - p0[1]) / 6);
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = clamp(p2[1] - (p3[1] - p1[1]) / 6);
+    d += ` C ${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
+
+// SVG line chart. With baseline set, fills above(+)/below(-) the baseline green/red
+let CLIP_SEQ = 0;
+function lineChart(points, opts = {}) {
+  const { area = false, showValues = true, color = "#39d353", xEvery = 1, baseline = null } = opts;
+  const W = 640, H = 200, padL = 28, padR = 18, padT = 26, padB = 24;
+  const n = points.length;
+  const maxV = Math.max(1, ...points.map(p => p.value));
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const bottom = padT + innerH;
+  const x = i => n === 1 ? padL + innerW / 2 : padL + innerW * i / (n - 1);
+  const y = v => padT + innerH * (1 - v / maxV);
+  const coords = points.map((p, i) => [x(i), y(p.value)]);
+  const dotR = n > 15 ? 2.5 : 4;
+  const x0 = coords[0][0], xL = coords[n - 1][0];
+  // curve path (M start point + bezier segments)
+  const curve = n > 1 ? `M ${x0.toFixed(1)},${coords[0][1].toFixed(1)}${smoothBody(coords, padT, bottom)}` : "";
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" class="chartsvg" preserveAspectRatio="xMidYMid meet">`;
+
+  if (baseline != null && n > 1) {
+    const baseY = y(baseline);
+    const id = ++CLIP_SEQ;
+    // area between the curve and the baseline (split above/below by clip)
+    const areaD = `M ${x0.toFixed(1)},${baseY.toFixed(1)} L ${x0.toFixed(1)},${coords[0][1].toFixed(1)}${smoothBody(coords, padT, bottom)} L ${xL.toFixed(1)},${baseY.toFixed(1)} Z`;
+    svg += `<defs>
+      <clipPath id="up${id}"><rect x="0" y="0" width="${W}" height="${baseY.toFixed(1)}"/></clipPath>
+      <clipPath id="dn${id}"><rect x="0" y="${baseY.toFixed(1)}" width="${W}" height="${(H - baseY).toFixed(1)}"/></clipPath>
+    </defs>`;
+    svg += `<path d="${areaD}" fill="#39d353" opacity="0.22" clip-path="url(#up${id})"/>`;
+    svg += `<path d="${areaD}" fill="#f85149" opacity="0.22" clip-path="url(#dn${id})"/>`;
+    svg += `<line x1="${padL}" y1="${baseY.toFixed(1)}" x2="${padL + innerW}" y2="${baseY.toFixed(1)}" class="cbase"/>`;
+    svg += `<text x="${padL + innerW}" y="${(baseY - 5).toFixed(1)}" text-anchor="end" class="cx">평균 ${baseline.toFixed(1)}</text>`;
+    svg += `<path d="${curve}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round"/>`;
+  } else {
+    if (area && n > 1) svg += `<path d="M ${x0.toFixed(1)},${bottom} L ${x0.toFixed(1)},${coords[0][1].toFixed(1)}${smoothBody(coords, padT, bottom)} L ${xL.toFixed(1)},${bottom} Z" fill="${color}" opacity="0.12"/>`;
+    if (n > 1) svg += `<path d="${curve}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round"/>`;
+  }
+
+  points.forEach((p, i) => {
+    const [cx, cy] = coords[i];
+    svg += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${dotR}" fill="${color}"/>`;
+    if (showValues) svg += `<text x="${cx.toFixed(1)}" y="${(cy - 9).toFixed(1)}" text-anchor="middle" class="cval">${p.value}</text>`;
+    if (i % xEvery === 0 || i === n - 1) svg += `<text x="${cx.toFixed(1)}" y="${H - 7}" text-anchor="middle" class="cx">${p.label}</text>`;
+  });
+  svg += `</svg>`;
+  return svg;
+}
+
+function renderPersonal() {
+  const sec = document.getElementById("personal");
+  const body = document.getElementById("personalBody");
+  if (!CUR_USER) { sec.style.display = "none"; return; }
+  sec.style.display = "";
+  document.getElementById("userSelect").value = CUR_USER;
+
+  const [year, month] = CUR_MONTH.split("-").map(Number);
+  const totalDays = daysInMonth(year, month);
+
+  // monthly trend
+  const monthly = userMonthly(CUR_USER);
+  const totalAll = monthly.reduce((s, p) => s + p.value, 0);
+
+  // this month's check-ins + 7-day moving trend
+  const daySet = userDaySet(CUR_USER, CUR_MONTH);
+  const thisMonth = daySet.size;
+  const bestStreak = allTimeStreak(CUR_USER);
+
+  // for the ongoing month, only show up to today
+  const now = new Date();
+  const curKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const lastDay = CUR_MONTH === curKey ? Math.min(totalDays, now.getDate()) : totalDays;
+
+  // per-day "check-ins in the last 7 days" (includes the previous month, crosses month boundary)
+  const allDates = userAllDates(CUR_USER);
+  const rolling = [];
+  for (let d = 1; d <= lastDay; d++) {
+    let c = 0;
+    for (let back = 0; back < 7; back++) {
+      const dt = new Date(year, month - 1, d - back);
+      if (allDates.has(fmtDate(dt))) c++;
+    }
+    rolling.push({ label: String(d), value: c });
+  }
+  const rollingAvg = rolling.length ? rolling.reduce((s, p) => s + p.value, 0) / rolling.length : 0;
+
+  const streakLabel = bestStreak.len > 0
+    ? `최장 연속 (${fmtMD(bestStreak.start)}~${fmtMD(bestStreak.end)})` : "최장 연속(일)";
+  const chips = [
+    [thisMonth, `${MONTH_NAMES[month - 1]} 인증`],
+    [bestStreak.len, streakLabel],
+    [totalAll, "전체 누적"],
+  ].map(([n, l]) => `<div class="chip"><div class="cn">${n}</div><div class="cl">${l}</div></div>`).join("");
+
+  const monthlyNote = monthly.length < 2
+    ? `<div class="chart-note">달이 쌓이면 추세선이 그려져요 🌱</div>` : "";
+
+  body.innerHTML = `
+    <div class="chips">${chips}</div>
+    <div class="chart-block">
+      <div class="chart-title">월별 인증 횟수 추세</div>
+      ${lineChart(monthly, { color: "#58a6ff", showValues: true })}
+      ${monthlyNote}
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">${MONTH_NAMES[month - 1]} 7일 이동 인증 추세 (최근 7일간 인증 횟수)</div>
+      ${lineChart(rolling, { color: "#e6edf3", showValues: false, xEvery: 5, baseline: rollingAvg })}
+      <div class="chart-note">점선(평균) <span style="color:#39d353">위 초록 = 페이스 좋음(+)</span>, <span style="color:#f85149">아래 빨강 = 슬럼프(−)</span>.</div>
+    </div>`;
+}
+
+function selectUser(name) {
+  CUR_USER = name;
+  renderPersonal();
+  document.getElementById("personal").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function allUsers() {
+  const totals = {};
+  for (const m of MONTHS) {
+    const data = DATA[m] || {};
+    for (const d in data) for (const p of data[d]) totals[p] = (totals[p] || 0) + 1;
+  }
+  return Object.keys(totals).sort((a, b) => totals[b] - totals[a] || a.localeCompare(b));
+}
+
+function topUserOf(monthKey) {
+  const data = DATA[monthKey] || {};
+  const cnt = {};
+  for (const d in data) for (const p of data[d]) cnt[p] = (cnt[p] || 0) + 1;
+  const arr = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || a.localeCompare(b));
+  return arr[0] || null;
+}
+
+async function init() {
+  try { await loadCheckins(); }
+  catch (e) {
+    document.getElementById("content").innerHTML = `<div class="empty">데이터를 불러오지 못했어요.</div>`;
+    return;
+  }
+  if (MONTHS.length === 0) {
+    document.getElementById("content").innerHTML = `<div class="empty">아직 인증 기록이 없어요.</div>`;
+    return;
+  }
+
+  const sel = document.getElementById("monthSelect");
+  const descMonths = MONTHS.slice().reverse();
+  const now = new Date();
+  const current = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  CUR_MONTH = descMonths.includes(current) ? current : descMonths[0];
+
+  sel.innerHTML = descMonths.map(m => {
+    const [y, mo] = m.split("-").map(Number);
+    return `<option value="${m}">${y}년 ${MONTH_NAMES[mo - 1]}</option>`;
+  }).join("");
+  sel.value = CUR_MONTH;
+  sel.addEventListener("change", () => {
+    CUR_MONTH = sel.value;
+    renderDashboard(CUR_MONTH);
+    renderPersonal();
+  });
+
+  // user select
+  const usel = document.getElementById("userSelect");
+  const users = allUsers();
+  usel.innerHTML = users.map(u => `<option value="${u}">${u}</option>`).join("");
+  usel.addEventListener("change", () => { CUR_USER = usel.value; renderPersonal(); });
+  CUR_USER = topUserOf(CUR_MONTH) || users[0] || null;
+
+  renderDashboard(CUR_MONTH);
+  renderPersonal();
+}
+
+init();
+</script>
+</body>
+</html>
