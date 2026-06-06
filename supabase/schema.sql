@@ -19,8 +19,8 @@ create table if not exists checkins (
   slack_user_id text,                  -- set for bot check-ins (null for imported history)
   duration_min  int,                   -- optional: workout duration in minutes
   calories      int,                   -- optional: calories burned
-  created_at    timestamptz not null default now(),
-  unique (checkin_date, nickname)      -- one per day
+  created_at    timestamptz not null default now()
+  -- multiple check-ins per day are allowed; ranking counts distinct days
 );
 
 create index if not exists checkins_date_idx on checkins (checkin_date);

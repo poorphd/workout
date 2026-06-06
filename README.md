@@ -36,13 +36,16 @@ scripts/
 
 | Command | Action |
 |---------|--------|
-| `/운동 인증` | Check in for today (first-time users get a name-picker modal) |
-| `/운동 취소` | Cancel today's check-in |
-| `/운동 내기록` | Your monthly count, longest streak, weekly goal |
-| `/운동 순위` | This month's leaderboard |
+| `/운동 인증` | Check in for today via a modal (optional duration/calories; multiple per day allowed) |
+| `/운동 취소` | Cancel today's check-in(s) |
+| `/운동 내기록` | Your monthly workout days, longest streak, metrics, weekly goal |
+| `/운동 순위` | This month's leaderboard (by distinct workout days) |
 | `/운동 이름변경 <name>` | Change your nickname |
-| `/운동 목표설정 <n>` | Set a weekly goal (check-ins show achievement %) |
+| `/운동 목표설정 <n>` | Set a weekly goal in days (check-ins show achievement %) |
 | `/운동` or `/운동 도움말` | Help |
+
+Ranking, weekly goals, and streaks all count **distinct workout days**, so checking in
+multiple times in one day doesn't inflate them.
 
 ## Setup
 

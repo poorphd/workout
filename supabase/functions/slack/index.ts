@@ -72,7 +72,7 @@ const HELP = [
   "• `/운동 내기록` — 내 이번달 기록",
   "• `/운동 순위` — 이번달 리더보드",
   "• `/운동 이름변경 새이름` — 닉네임 변경",
-  "• `/운동 목표설정 5` — 주간 목표 횟수 설정",
+  "• `/운동 목표설정 5` — 주간 목표 일수 설정",
 ].join("\n");
 
 // ── longest streak (YYYY-MM-DD[] → number of days) ──
@@ -103,31 +103,30 @@ function metricSuffix(duration: number | null, calories: number | null): string 
   return parts.length ? " · " + parts.join(" · ") : "";
 }
 
-// ── record today's check-in (returns false if it already exists) ──
+// ── record a check-in (multiple per day allowed) → returns today's check-in count for this user ──
 async function recordCheckin(
   nickname: string, slackUserId: string,
   duration: number | null = null, calories: number | null = null,
-): Promise<boolean> {
+): Promise<number> {
   const { error } = await supabase.from("checkins").insert({
     checkin_date: todayKST(), nickname, slack_user_id: slackUserId,
     duration_min: duration, calories,
   });
-  if (error) {
-    if (error.code === "23505") return false;
-    throw error;
-  }
-  return true;
+  if (error) throw error;
+  const { count } = await supabase.from("checkins")
+    .select("*", { count: "exact", head: true })
+    .eq("checkin_date", todayKST()).eq("nickname", nickname);
+  return count ?? 1;
 }
 
-// update today's metrics on an existing check-in (for the "already checked in" case)
-async function updateMetrics(nickname: string, duration: number | null, calories: number | null): Promise<boolean> {
-  const patch: Record<string, number> = {};
-  if (duration != null) patch.duration_min = duration;
-  if (calories != null) patch.calories = calories;
-  if (!Object.keys(patch).length) return false;
-  await supabase.from("checkins").update(patch)
-    .eq("checkin_date", todayKST()).eq("nickname", nickname);
-  return true;
+// distinct workout days per nickname for the current month → { nickname: dayCount }
+async function monthlyDayCounts(ym: string): Promise<Record<string, number>> {
+  const { data } = await supabase.from("checkins").select("nickname,checkin_date").gte("checkin_date", `${ym}-01`);
+  const days: Record<string, Set<string>> = {};
+  for (const r of data ?? []) (days[r.nickname] = days[r.nickname] || new Set()).add(r.checkin_date as string);
+  const counts: Record<string, number> = {};
+  for (const n in days) counts[n] = days[n].size;
+  return counts;
 }
 
 // ── send a Slack message ──
@@ -140,31 +139,36 @@ async function slackPost(body: Record<string, unknown>): Promise<any> {
   return await res.json();
 }
 
-// ── post a check-in thread comment to the channel (includes rank change) ──
-async function announceCheckin(nickname: string, duration: number | null = null, calories: number | null = null) {
+// ── post a check-in thread comment to the channel (rank is by distinct workout days) ──
+async function announceCheckin(
+  nickname: string, duration: number | null = null, calories: number | null = null, todayCount = 1,
+) {
   if (!CHANNEL_ID) return;
   const date = todayKST();
   const [, mm, dd] = date.split("-").map(Number);
   const ym = date.slice(0, 7);
 
-  // this month's counts (after the check-in was recorded)
-  const { data } = await supabase.from("checkins").select("nickname").gte("checkin_date", `${ym}-01`);
-  const counts: Record<string, number> = {};
-  for (const r of data ?? []) counts[r.nickname] = (counts[r.nickname] ?? 0) + 1;
+  // distinct workout days this month (after the check-in was recorded)
+  const counts = await monthlyDayCounts(ym);
   const myAfter = counts[nickname] ?? 1;
   const others = Object.entries(counts).filter(([n]) => n !== nickname).map(([, c]) => c);
   const rankOf = (val: number) => 1 + others.filter((c) => c > val).length; // tied ranks (Olympic style)
   const afterRank = rankOf(myAfter);
-  const myBefore = myAfter - 1;
 
   let rankMsg: string;
-  if (myBefore <= 0) {
-    rankMsg = `🎉 ${mm}월 첫 인증! 현재 *${afterRank}위*`;
+  if (todayCount > 1) {
+    // extra check-in on a day already counted → no rank change
+    rankMsg = `💪 오늘 ${todayCount}번째 운동! ${mm}월 현재 *${afterRank}위* · ${myAfter}일`;
   } else {
-    const beforeRank = rankOf(myBefore);
-    rankMsg = afterRank < beforeRank
-      ? `📈 ${mm}월 순위 *${beforeRank}위 → ${afterRank}위* 상승!`
-      : `${mm}월 현재 *${afterRank}위* · 이번달 ${myAfter}회`;
+    const myBefore = myAfter - 1; // today is a newly counted day
+    if (myBefore <= 0) {
+      rankMsg = `🎉 ${mm}월 첫 인증! 현재 *${afterRank}위*`;
+    } else {
+      const beforeRank = rankOf(myBefore);
+      rankMsg = afterRank < beforeRank
+        ? `📈 ${mm}월 순위 *${beforeRank}위 → ${afterRank}위* 상승!`
+        : `${mm}월 현재 *${afterRank}위* · ${myAfter}일`;
+    }
   }
 
   // get today's thread (create the parent message if missing)
@@ -190,12 +194,15 @@ async function announceCheckin(nickname: string, duration: number | null = null,
   const wp = await weeklyProgress(nickname);
   const goalMsg = wp ? `\n🎯 이번주 목표 달성률 *${wp.pct}%* (${wp.count}/${wp.goal})` : "";
   const metricMsg = metricSuffix(duration, calories);
-  await slackPost({ channel: CHANNEL_ID, thread_ts: ts, text: `*${nickname}* 님이 오늘의 운동을 인증했어요!${metricMsg}\n${rankMsg}${goalMsg}` });
+  const header = todayCount > 1
+    ? `*${nickname}* 님이 오늘 운동을 추가로 인증했어요!`
+    : `*${nickname}* 님이 오늘의 운동을 인증했어요!`;
+  await slackPost({ channel: CHANNEL_ID, thread_ts: ts, text: `${header}${metricMsg}\n${rankMsg}${goalMsg}` });
 }
 
 // run the channel notification in the background so the response isn't delayed (waitUntil if available)
-function announceBg(nickname: string, duration: number | null = null, calories: number | null = null) {
-  const p = announceCheckin(nickname, duration, calories).catch((e) => console.error("announce error", e));
+function announceBg(nickname: string, duration: number | null = null, calories: number | null = null, todayCount = 1) {
+  const p = announceCheckin(nickname, duration, calories, todayCount).catch((e) => console.error("announce error", e));
   const ed = (globalThis as any).EdgeRuntime;
   if (ed?.waitUntil) ed.waitUntil(p);
   return ed?.waitUntil ? Promise.resolve() : p;
@@ -215,7 +222,7 @@ async function weeklyProgress(nickname: string) {
   if (!goal) return null;
   const { data } = await supabase
     .from("checkins").select("checkin_date").eq("nickname", nickname).gte("checkin_date", weekStartKST());
-  const count = (data ?? []).length;
+  const count = new Set((data ?? []).map((r) => r.checkin_date as string)).size; // distinct days
   return { count, goal, pct: Math.round((count / goal) * 100) };
 }
 
@@ -289,11 +296,11 @@ async function openModal(triggerId: string, names: string[]) {
   });
   blocks.push({
     type: "input", block_id: "goal",
-    label: { type: "plain_text", text: "주당 목표 운동 횟수" },
+    label: { type: "plain_text", text: "주당 목표 운동 일수" },
     element: {
       type: "static_select", action_id: "g",
-      placeholder: { type: "plain_text", text: "횟수 선택" },
-      options: [1, 2, 3, 4, 5, 6, 7].map((n) => ({ text: { type: "plain_text", text: `주 ${n}회` }, value: String(n) })),
+      placeholder: { type: "plain_text", text: "일수 선택" },
+      options: [1, 2, 3, 4, 5, 6, 7].map((n) => ({ text: { type: "plain_text", text: `주 ${n}일` }, value: String(n) })),
     },
   });
   blocks.push(...metricBlocks());
@@ -339,8 +346,9 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
     const { data: del } = await supabase
       .from("checkins").delete()
       .eq("checkin_date", todayKST()).eq("nickname", member!.nickname).select();
-    return ephemeral(del && del.length
-      ? `오늘 인증을 취소했어요. (${member!.nickname})`
+    const n = del?.length ?? 0;
+    return ephemeral(n
+      ? `오늘 인증을 취소했어요. (${n}건, ${member!.nickname})`
       : "오늘은 인증 기록이 없어요.");
   }
 
@@ -351,32 +359,30 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
     const dates = rows.map((r) => r.checkin_date as string);
     const ym = thisMonthKST();
     const monthRows = rows.filter((r) => (r.checkin_date as string).startsWith(ym));
-    const monthCount = monthRows.length;
+    const monthDays = new Set(monthRows.map((r) => r.checkin_date as string)).size;
+    const totalDays = new Set(dates).size;
     const sumMin = monthRows.reduce((s, r) => s + (r.duration_min ?? 0), 0);
     const sumKcal = monthRows.reduce((s, r) => s + (r.calories ?? 0), 0);
     const streak = longestStreak(dates);
     const moName = MONTH_NAMES[Number(ym.slice(5, 7)) - 1];
     const wp = await weeklyProgress(member!.nickname);
-    const goalLine = wp ? `\n• 이번주 목표: *${wp.count}/${wp.goal}회* (달성률 ${wp.pct}%)` : "";
+    const goalLine = wp ? `\n• 이번주 목표: *${wp.count}/${wp.goal}일* (달성률 ${wp.pct}%)` : "";
     const metricLine = (sumMin || sumKcal)
       ? `\n• ${moName} 운동시간: *${sumMin}분* · 칼로리: *${sumKcal}kcal*` : "";
     return ephemeral(
-      `*${member!.nickname}님의 기록* 📊\n• ${moName} 인증: *${monthCount}회*\n• 최장 연속: *${streak}일*\n• 전체 누적: *${dates.length}회*${metricLine}${goalLine}`,
+      `*${member!.nickname}님의 기록* 📊\n• ${moName} 운동: *${monthDays}일* (${monthRows.length}회)\n• 최장 연속: *${streak}일*\n• 전체 누적: *${totalDays}일*${metricLine}${goalLine}`,
     );
   }
 
   if (sub === "순위") {
     const ym = thisMonthKST();
-    const { data } = await supabase
-      .from("checkins").select("nickname").gte("checkin_date", `${ym}-01`);
-    const cnt: Record<string, number> = {};
-    for (const r of data ?? []) cnt[r.nickname] = (cnt[r.nickname] ?? 0) + 1;
-    const ranked = Object.entries(cnt).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const counts = await monthlyDayCounts(ym); // distinct workout days
+    const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10);
     if (!ranked.length) return ephemeral("이번달 인증 기록이 아직 없어요.");
     const medals = ["🥇", "🥈", "🥉"];
     const moName = MONTH_NAMES[Number(ym.slice(5, 7)) - 1];
-    const lines = ranked.map(([n, c], i) => `${medals[i] ?? `${i + 1}.`} ${n} — ${c}회`);
-    return ephemeral(`*${moName} 운동 순위* 🏆\n${lines.join("\n")}`);
+    const lines = ranked.map(([n, c], i) => `${medals[i] ?? `${i + 1}.`} ${n} — ${c}일`);
+    return ephemeral(`*${moName} 운동 순위* 🏆 (운동 일수)\n${lines.join("\n")}`);
   }
 
   if (sub === "이름변경") {
@@ -397,13 +403,13 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
   if (sub === "목표설정") {
     if (!rest[0]) {
       return ephemeral(member!.weekly_goal
-        ? `현재 주간 목표: *${member!.weekly_goal}회*\n변경하려면 \`/운동 목표설정 5\``
+        ? `현재 주간 목표: *${member!.weekly_goal}일*\n변경하려면 \`/운동 목표설정 5\``
         : "주간 목표가 없어요. 설정하려면 `/운동 목표설정 5`");
     }
     const n = parseInt(rest[0], 10);
-    if (isNaN(n) || n < 1 || n > 21) return ephemeral("1~21 사이 숫자로 입력해주세요. 예: `/운동 목표설정 5`");
+    if (isNaN(n) || n < 1 || n > 7) return ephemeral("1~7 사이 숫자로 입력해주세요. 예: `/운동 목표설정 5`");
     await supabase.from("members").update({ weekly_goal: n }).eq("slack_user_id", slackUserId);
-    return ephemeral(`주간 목표 *${n}회* 설정 완료! 💪`);
+    return ephemeral(`주간 목표 *${n}일* 설정 완료! 💪`);
   }
 
   // empty input / help / unknown command
@@ -445,9 +451,9 @@ async function handleRegisterSubmit(payload: any): Promise<Response> {
     return json({ response_action: "errors", errors: { newname: "등록 중 오류가 났어요. 다시 시도해주세요." } });
   }
 
-  const fresh = await recordCheckin(nickname, slackUserId, duration, calories);
-  if (fresh) await announceBg(nickname, duration, calories);
-  const goalNote = weekly_goal ? ` (주간 목표 ${weekly_goal}회)` : "";
+  const todayCount = await recordCheckin(nickname, slackUserId, duration, calories);
+  await announceBg(nickname, duration, calories, todayCount);
+  const goalNote = weekly_goal ? ` (주간 목표 ${weekly_goal}일)` : "";
   await slackPost({ channel: slackUserId, text: `'${nickname}' 이름으로 등록하고 오늘 인증 완료! 🔥${metricSuffix(duration, calories)}${goalNote}` });
   return empty();
 }
@@ -460,16 +466,12 @@ async function handleCheckinSubmit(payload: any): Promise<Response> {
     return json({ response_action: "errors", errors: { duration: "먼저 `/운동 인증` 으로 등록해주세요." } });
   }
   const { duration, calories } = readMetrics(payload.view.state.values);
-  const fresh = await recordCheckin(member.nickname, slackUserId, duration, calories);
-  if (fresh) {
-    await announceBg(member.nickname, duration, calories);
-    await slackPost({ channel: slackUserId, text: `오늘 운동 인증 완료! 🔥 (${member.nickname})${metricSuffix(duration, calories)}` });
-  } else {
-    const updated = await updateMetrics(member.nickname, duration, calories);
-    await slackPost({ channel: slackUserId, text: updated
-      ? `오늘은 이미 인증했어요 ✅ 기록을 업데이트했어요${metricSuffix(duration, calories)} (${member.nickname})`
-      : `오늘은 이미 인증했어요 ✅ (${member.nickname})` });
-  }
+  const todayCount = await recordCheckin(member.nickname, slackUserId, duration, calories);
+  await announceBg(member.nickname, duration, calories, todayCount);
+  const msg = todayCount > 1
+    ? `오늘 ${todayCount}번째 운동 인증 완료! 💪 (${member.nickname})${metricSuffix(duration, calories)}`
+    : `오늘 운동 인증 완료! 🔥 (${member.nickname})${metricSuffix(duration, calories)}`;
+  await slackPost({ channel: slackUserId, text: msg });
   return empty();
 }
 
