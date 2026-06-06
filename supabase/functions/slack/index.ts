@@ -127,18 +127,26 @@ async function uploadPhotoToThread(threadTs: string, photo: { url: string; name:
   try {
     const fileRes = await fetch(photo.url, { headers: { authorization: `Bearer ${BOT_TOKEN}` } });
     const bytes = new Uint8Array(await fileRes.arrayBuffer());
+    const ctype = fileRes.headers.get("content-type") || "";
+    console.log("photo download:", fileRes.status, ctype, bytes.length, "bytes");
+    if (!fileRes.ok || ctype.includes("text/html")) { console.error("download failed (check files:read scope)"); return false; }
+
     const up = await (await fetch("https://slack.com/api/files.getUploadURLExternal", {
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Bearer ${BOT_TOKEN}` },
       body: new URLSearchParams({ filename: photo.name, length: String(bytes.length) }),
     })).json();
-    if (!up.ok) return false;
+    if (!up.ok) { console.error("getUploadURLExternal failed (check files:write scope):", up); return false; }
+
     const fd = new FormData();
     fd.append("file", new Blob([bytes], { type: photo.mime || "application/octet-stream" }), photo.name);
-    await fetch(up.upload_url, { method: "POST", body: fd });
+    const upRes = await fetch(up.upload_url, { method: "POST", body: fd });
+    console.log("upload POST:", upRes.status);
+
     const done = await (await fetch("https://slack.com/api/files.completeUploadExternal", {
       method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${BOT_TOKEN}` },
       body: JSON.stringify({ files: [{ id: up.file_id, title: photo.name }], channel_id: CHANNEL_ID, thread_ts: threadTs, initial_comment: comment }),
     })).json();
+    if (!done.ok) console.error("completeUploadExternal failed:", done);
     return !!done.ok;
   } catch (e) { console.error("photo upload failed", e); return false; }
 }
