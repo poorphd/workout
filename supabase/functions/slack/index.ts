@@ -5,7 +5,7 @@
 //   (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are injected automatically by Supabase)
 //
 // Subcommands:
-//   /운동 인증            check in for today (first-time users get a name-picker modal)
+//   /운동 인증            check in for today (modal: optional time/calories; first-timers also pick a name)
 //   /운동 취소            cancel today's check-in
 //   /운동 내기록          your monthly count / longest streak
 //   /운동 순위            this month's leaderboard
@@ -89,15 +89,44 @@ function longestStreak(dates: string[]): number {
   return best;
 }
 
+// parse an optional positive integer metric (returns null if empty/invalid)
+function parseMetric(v: string | undefined, max: number): number | null {
+  const n = parseInt((v ?? "").replace(/[^0-9]/g, ""), 10);
+  return Number.isFinite(n) && n > 0 && n <= max ? n : null;
+}
+
+// "· 45분 · 300kcal" style suffix (empty if no metrics)
+function metricSuffix(duration: number | null, calories: number | null): string {
+  const parts: string[] = [];
+  if (duration != null) parts.push(`${duration}분`);
+  if (calories != null) parts.push(`${calories}kcal`);
+  return parts.length ? " · " + parts.join(" · ") : "";
+}
+
 // ── record today's check-in (returns false if it already exists) ──
-async function recordCheckin(nickname: string, slackUserId: string): Promise<boolean> {
+async function recordCheckin(
+  nickname: string, slackUserId: string,
+  duration: number | null = null, calories: number | null = null,
+): Promise<boolean> {
   const { error } = await supabase.from("checkins").insert({
     checkin_date: todayKST(), nickname, slack_user_id: slackUserId,
+    duration_min: duration, calories,
   });
   if (error) {
     if (error.code === "23505") return false;
     throw error;
   }
+  return true;
+}
+
+// update today's metrics on an existing check-in (for the "already checked in" case)
+async function updateMetrics(nickname: string, duration: number | null, calories: number | null): Promise<boolean> {
+  const patch: Record<string, number> = {};
+  if (duration != null) patch.duration_min = duration;
+  if (calories != null) patch.calories = calories;
+  if (!Object.keys(patch).length) return false;
+  await supabase.from("checkins").update(patch)
+    .eq("checkin_date", todayKST()).eq("nickname", nickname);
   return true;
 }
 
@@ -112,7 +141,7 @@ async function slackPost(body: Record<string, unknown>): Promise<any> {
 }
 
 // ── post a check-in thread comment to the channel (includes rank change) ──
-async function announceCheckin(nickname: string) {
+async function announceCheckin(nickname: string, duration: number | null = null, calories: number | null = null) {
   if (!CHANNEL_ID) return;
   const date = todayKST();
   const [, mm, dd] = date.split("-").map(Number);
@@ -160,12 +189,13 @@ async function announceCheckin(nickname: string) {
   if (!ts) return;
   const wp = await weeklyProgress(nickname);
   const goalMsg = wp ? `\n🎯 이번주 목표 달성률 *${wp.pct}%* (${wp.count}/${wp.goal})` : "";
-  await slackPost({ channel: CHANNEL_ID, thread_ts: ts, text: `*${nickname}* 님이 오늘의 운동을 인증했어요!\n${rankMsg}${goalMsg}` });
+  const metricMsg = metricSuffix(duration, calories);
+  await slackPost({ channel: CHANNEL_ID, thread_ts: ts, text: `*${nickname}* 님이 오늘의 운동을 인증했어요!${metricMsg}\n${rankMsg}${goalMsg}` });
 }
 
 // run the channel notification in the background so the response isn't delayed (waitUntil if available)
-function announceBg(nickname: string) {
-  const p = announceCheckin(nickname).catch((e) => console.error("announce error", e));
+function announceBg(nickname: string, duration: number | null = null, calories: number | null = null) {
+  const p = announceCheckin(nickname, duration, calories).catch((e) => console.error("announce error", e));
   const ed = (globalThis as any).EdgeRuntime;
   if (ed?.waitUntil) ed.waitUntil(p);
   return ed?.waitUntil ? Promise.resolve() : p;
@@ -195,6 +225,44 @@ async function unclaimedNicknames(): Promise<string[]> {
   const { data: mem } = await supabase.from("members").select("nickname");
   const taken = new Set((mem ?? []).map((m) => m.nickname));
   return [...new Set((cks ?? []).map((c) => c.nickname))].filter((n) => !taken.has(n)).sort();
+}
+
+// optional workout-metric input blocks (shared by both modals)
+function metricBlocks(): unknown[] {
+  return [
+    {
+      type: "input", optional: true, block_id: "duration",
+      label: { type: "plain_text", text: "운동 시간 (분)" },
+      element: { type: "number_input", is_decimal_allowed: false, action_id: "v", min_value: "1", max_value: "1440" },
+    },
+    {
+      type: "input", optional: true, block_id: "calories",
+      label: { type: "plain_text", text: "소모 칼로리 (kcal)" },
+      element: { type: "number_input", is_decimal_allowed: false, action_id: "v", min_value: "1", max_value: "10000" },
+    },
+  ];
+}
+
+// ── open the check-in modal (registered users): optional time/calories ──
+async function openCheckinModal(triggerId: string) {
+  const blocks: unknown[] = [
+    { type: "section", text: { type: "mrkdwn", text: "오늘 운동을 인증합니다 💪\n아래는 선택 입력이에요 (비워도 됩니다)." } },
+    ...metricBlocks(),
+  ];
+  await fetch("https://slack.com/api/views.open", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${BOT_TOKEN}` },
+    body: JSON.stringify({
+      trigger_id: triggerId,
+      view: {
+        type: "modal", callback_id: "checkin",
+        title: { type: "plain_text", text: "운동 인증" },
+        submit: { type: "plain_text", text: "인증하기" },
+        close: { type: "plain_text", text: "취소" },
+        blocks,
+      },
+    }),
+  });
 }
 
 // ── open the name-picker modal ──
@@ -228,6 +296,7 @@ async function openModal(triggerId: string, names: string[]) {
       options: [1, 2, 3, 4, 5, 6, 7].map((n) => ({ text: { type: "plain_text", text: `주 ${n}회` }, value: String(n) })),
     },
   });
+  blocks.push(...metricBlocks());
 
   await fetch("https://slack.com/api/views.open", {
     method: "POST",
@@ -254,16 +323,11 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
 
   const member = await getMember(slackUserId);
 
-  // check-in: unregistered users get the modal, registered users record directly
+  // check-in: unregistered users get the registration modal, registered users get the check-in modal
   if (sub === "인증") {
-    if (!member) { await openModal(triggerId, await unclaimedNicknames()); return empty(); }
-    const fresh = await recordCheckin(member.nickname, slackUserId);
-    if (fresh) await announceBg(member.nickname);
-    const wp = await weeklyProgress(member.nickname);
-    const goalLine = wp ? `\n이번주 ${wp.count}/${wp.goal}회 · 달성률 ${wp.pct}%` : "";
-    return ephemeral((fresh
-      ? `오늘 운동 인증 완료! 🔥 (${member.nickname})`
-      : `오늘은 이미 인증했어요 ✅ (${member.nickname})`) + goalLine);
+    if (!member) await openModal(triggerId, await unclaimedNicknames());
+    else await openCheckinModal(triggerId);
+    return empty();
   }
 
   // commands other than check-in require registration
@@ -282,16 +346,22 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
 
   if (sub === "내기록") {
     const { data } = await supabase
-      .from("checkins").select("checkin_date").eq("nickname", member!.nickname);
-    const dates = (data ?? []).map((r) => r.checkin_date as string);
+      .from("checkins").select("checkin_date,duration_min,calories").eq("nickname", member!.nickname);
+    const rows = data ?? [];
+    const dates = rows.map((r) => r.checkin_date as string);
     const ym = thisMonthKST();
-    const monthCount = dates.filter((d) => d.startsWith(ym)).length;
+    const monthRows = rows.filter((r) => (r.checkin_date as string).startsWith(ym));
+    const monthCount = monthRows.length;
+    const sumMin = monthRows.reduce((s, r) => s + (r.duration_min ?? 0), 0);
+    const sumKcal = monthRows.reduce((s, r) => s + (r.calories ?? 0), 0);
     const streak = longestStreak(dates);
     const moName = MONTH_NAMES[Number(ym.slice(5, 7)) - 1];
     const wp = await weeklyProgress(member!.nickname);
     const goalLine = wp ? `\n• 이번주 목표: *${wp.count}/${wp.goal}회* (달성률 ${wp.pct}%)` : "";
+    const metricLine = (sumMin || sumKcal)
+      ? `\n• ${moName} 운동시간: *${sumMin}분* · 칼로리: *${sumKcal}kcal*` : "";
     return ephemeral(
-      `*${member!.nickname}님의 기록* 📊\n• ${moName} 인증: *${monthCount}회*\n• 최장 연속: *${streak}일*\n• 전체 누적: *${dates.length}회*${goalLine}`,
+      `*${member!.nickname}님의 기록* 📊\n• ${moName} 인증: *${monthCount}회*\n• 최장 연속: *${streak}일*\n• 전체 누적: *${dates.length}회*${metricLine}${goalLine}`,
     );
   }
 
@@ -340,8 +410,16 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
   return ephemeral(HELP);
 }
 
-// ── modal submission handling ──
-async function handleViewSubmission(payload: any): Promise<Response> {
+// read optional metrics from a modal's state
+function readMetrics(vals: any) {
+  return {
+    duration: parseMetric(vals.duration?.v?.value, 1440),
+    calories: parseMetric(vals.calories?.v?.value, 10000),
+  };
+}
+
+// ── registration modal submission (first-time user) ──
+async function handleRegisterSubmit(payload: any): Promise<Response> {
   const slackUserId = payload.user.id;
   const slackName = payload.user.username ?? payload.user.name ?? "";
   const vals = payload.view.state.values;
@@ -350,6 +428,7 @@ async function handleViewSubmission(payload: any): Promise<Response> {
   const nickname = typed || picked;
   const goalVal = vals.goal?.g?.selected_option?.value;
   const weekly_goal = goalVal ? parseInt(goalVal, 10) : null;
+  const { duration, calories } = readMetrics(vals);
 
   if (!nickname) {
     return json({ response_action: "errors", errors: { newname: "이름을 선택하거나 입력해주세요." } });
@@ -366,10 +445,31 @@ async function handleViewSubmission(payload: any): Promise<Response> {
     return json({ response_action: "errors", errors: { newname: "등록 중 오류가 났어요. 다시 시도해주세요." } });
   }
 
-  const fresh = await recordCheckin(nickname, slackUserId);
-  if (fresh) await announceBg(nickname);
+  const fresh = await recordCheckin(nickname, slackUserId, duration, calories);
+  if (fresh) await announceBg(nickname, duration, calories);
   const goalNote = weekly_goal ? ` (주간 목표 ${weekly_goal}회)` : "";
-  await slackPost({ channel: slackUserId, text: `'${nickname}' 이름으로 등록하고 오늘 인증 완료! 🔥${goalNote}` });
+  await slackPost({ channel: slackUserId, text: `'${nickname}' 이름으로 등록하고 오늘 인증 완료! 🔥${metricSuffix(duration, calories)}${goalNote}` });
+  return empty();
+}
+
+// ── check-in modal submission (registered user) ──
+async function handleCheckinSubmit(payload: any): Promise<Response> {
+  const slackUserId = payload.user.id;
+  const member = await getMember(slackUserId);
+  if (!member) {
+    return json({ response_action: "errors", errors: { duration: "먼저 `/운동 인증` 으로 등록해주세요." } });
+  }
+  const { duration, calories } = readMetrics(payload.view.state.values);
+  const fresh = await recordCheckin(member.nickname, slackUserId, duration, calories);
+  if (fresh) {
+    await announceBg(member.nickname, duration, calories);
+    await slackPost({ channel: slackUserId, text: `오늘 운동 인증 완료! 🔥 (${member.nickname})${metricSuffix(duration, calories)}` });
+  } else {
+    const updated = await updateMetrics(member.nickname, duration, calories);
+    await slackPost({ channel: slackUserId, text: updated
+      ? `오늘은 이미 인증했어요 ✅ 기록을 업데이트했어요${metricSuffix(duration, calories)} (${member.nickname})`
+      : `오늘은 이미 인증했어요 ✅ (${member.nickname})` });
+  }
   return empty();
 }
 
@@ -383,7 +483,11 @@ Deno.serve(async (req) => {
   try {
     if (payloadStr) {
       const payload = JSON.parse(payloadStr);
-      if (payload.type === "view_submission") return await handleViewSubmission(payload);
+      if (payload.type === "view_submission") {
+        return payload.view?.callback_id === "checkin"
+          ? await handleCheckinSubmit(payload)
+          : await handleRegisterSubmit(payload);
+      }
       return empty();
     }
     if (params.get("command")) return await handleCommand(params);

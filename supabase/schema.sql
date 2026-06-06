@@ -17,6 +17,8 @@ create table if not exists checkins (
   checkin_date  date not null,         -- check-in date (KST)
   nickname      text not null,         -- who (same value as members.nickname)
   slack_user_id text,                  -- set for bot check-ins (null for imported history)
+  duration_min  int,                   -- optional: workout duration in minutes
+  calories      int,                   -- optional: calories burned
   created_at    timestamptz not null default now(),
   unique (checkin_date, nickname)      -- one per day
 );

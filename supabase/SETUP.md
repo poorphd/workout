@@ -59,6 +59,7 @@ After deploying, the function URL is:
 - Create the `daily_threads` table: run `supabase/add_threads.sql` in the SQL Editor
   (already included if you ran the latest `schema.sql`)
 - Add the weekly-goal column: run `supabase/add_goal.sql`
+- Add the optional workout metric columns: run `supabase/add_metrics.sql`
 
 ## 4. Set the Edge Function secrets
 
@@ -87,8 +88,9 @@ Use the subcommands in any Slack channel:
 | `/운동 목표설정 <n>` | Set weekly goal (achievement % shown on check-in) |
 | `/운동` or `/운동 도움말` | Help |
 
-- **First-time user**: `/운동 인증` → name modal (pick existing or enter new) → "인증하기"
-- Running `/운동 인증` again the same day shows "이미 인증했어요 ✅"
+- `/운동 인증` opens a modal with optional **운동 시간(분) / 소모 칼로리(kcal)** fields (leave blank to skip)
+- **First-time user**: the modal also asks for a name (pick existing or enter new) + weekly goal
+- Running `/운동 인증` again the same day updates today's metrics ("이미 인증했어요 ✅ 기록 업데이트")
 
 ## 6. Connect the dashboard
 
