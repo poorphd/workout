@@ -74,7 +74,8 @@ After deploying, the function URL is:
 supabase secrets set \
   SLACK_SIGNING_SECRET=<Signing Secret from step 3> \
   SLACK_BOT_TOKEN=<xoxb-... token> \
-  SLACK_CHANNEL_ID=<C0... channel ID>
+  SLACK_CHANNEL_ID=<C0... channel ID> \
+  CRON_SECRET=<any random string>          # used by the daily-thread cron
 
 # redeploy so the secrets take effect
 supabase functions deploy slack --no-verify-jwt
@@ -99,6 +100,16 @@ Use the subcommands in any Slack channel:
 - The photo a user uploads in DM is re-uploaded into the channel thread (not stored in the DB).
 - **Multiple check-ins per day are allowed** — each is its own session
 - **Ranking / weekly goal / streak count distinct workout days**, not the number of check-ins
+
+## 5-1. Daily thread (00:00 KST)
+
+A scheduled job creates each day's check-in thread at midnight KST; its parent message
+shows yesterday's recap + the dashboard link, and that day's check-ins reply under it.
+(If the job is skipped for any reason, the first check-in of the day still creates the thread.)
+
+1. Set `CRON_SECRET` as a function secret (see step 4) and redeploy.
+2. Edit `supabase/cron.sql`: replace `<CRON_SECRET>` with the same value.
+3. Run `supabase/cron.sql` in the SQL Editor (enables `pg_cron` + `pg_net` and schedules the job at 15:00 UTC = 00:00 KST).
 
 ## 6. Connect the dashboard
 

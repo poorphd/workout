@@ -14,6 +14,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const SIGNING_SECRET = Deno.env.get("SLACK_SIGNING_SECRET")!;
 const BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 const CHANNEL_ID = Deno.env.get("SLACK_CHANNEL_ID"); // channel for check-in threads
+const DASHBOARD_URL = "https://poorphd.github.io/workout/";
 const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
 const MONTH_NAMES = ["1월","2월","3월","4월","5월","6월","7월","8월","9월","10월","11월","12월"];
@@ -149,11 +150,55 @@ async function uploadPhotoToThread(threadTs: string, photo: { url: string; name:
   } catch (e) { console.error("photo upload failed", e); return false; }
 }
 
+// shift a YYYY-MM-DD string by delta days
+function addDaysKST(dateStr: string, delta: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + delta);
+  return dt.toISOString().slice(0, 10);
+}
+
+// yesterday's recap line for the day's parent message
+async function yesterdaySummary(date: string): Promise<string> {
+  const y = addDaysKST(date, -1);
+  const [, ym, yd] = y.split("-").map(Number);
+  const { data } = await supabase.from("checkins").select("nickname,duration_min,calories").eq("checkin_date", y);
+  const rows = data ?? [];
+  if (!rows.length) return `📊 어제(${ym}/${yd})는 인증이 없었어요 😴 오늘 첫 주자가 되어보세요!`;
+  const names = [...new Set(rows.map((r) => r.nickname as string))];
+  const min = rows.reduce((s, r) => s + (r.duration_min ?? 0), 0);
+  const cal = rows.reduce((s, r) => s + (r.calories ?? 0), 0);
+  const extra = (min || cal) ? ` · ${[min ? `⏱️ ${min}분` : "", cal ? `🔥 ${cal}kcal` : ""].filter(Boolean).join(" · ")}` : "";
+  return `📊 어제(${ym}/${yd}) *${names.length}명* 인증${extra}\n🙌 ${names.join(", ")}`;
+}
+
+// create the day's parent thread message (recap + dashboard link) and store its ts
+async function createParent(date: string): Promise<string | null> {
+  if (!CHANNEL_ID) return null;
+  const [, mm, dd] = date.split("-").map(Number);
+  const text = `*${mm}월 ${dd}일 운동 인증 스레드* 💪 오늘도 \`/운동 인증\` 으로!\n\n${await yesterdaySummary(date)}\n📈 대시보드: ${DASHBOARD_URL}`;
+  const parent = await slackPost({ channel: CHANNEL_ID, text });
+  if (parent?.ok && parent.ts) {
+    await supabase.from("daily_threads").upsert({ thread_date: date, channel: CHANNEL_ID, thread_ts: parent.ts });
+    return parent.ts;
+  }
+  return null;
+}
+
+// midnight job: create today's thread up front (skips if it already exists)
+async function createDailyThread() {
+  if (!CHANNEL_ID) return;
+  const date = todayKST();
+  const { data: existing } = await supabase.from("daily_threads").select("thread_ts").eq("thread_date", date).eq("channel", CHANNEL_ID).maybeSingle();
+  if (existing) return;
+  await createParent(date);
+}
+
 // ── post the check-in thread comment (rank by distinct days; optional photo) ──
 async function announceCheckin(nickname: string, workout: string | null, duration: number | null, calories: number | null, todayCount: number, photo: { url: string; name: string; mime: string } | null) {
   if (!CHANNEL_ID) return;
   const date = todayKST();
-  const [, mm, dd] = date.split("-").map(Number);
+  const mm = Number(date.slice(5, 7));
   const ym = date.slice(0, 7);
 
   const counts = await monthlyDayCounts(ym);
@@ -174,19 +219,9 @@ async function announceCheckin(nickname: string, workout: string | null, duratio
     }
   }
 
-  // ensure today's thread
-  let ts: string | null = null;
+  // ensure today's thread (cron usually creates it at 00:00; fall back to creating on first check-in)
   const { data: existing } = await supabase.from("daily_threads").select("thread_ts").eq("thread_date", date).eq("channel", CHANNEL_ID).maybeSingle();
-  if (existing) ts = existing.thread_ts;
-  else {
-    const parent = await slackPost({ channel: CHANNEL_ID, text: `*${mm}월 ${dd}일 운동 인증 스레드* 💪` });
-    if (parent?.ok && parent.ts) {
-      ts = parent.ts;
-      await supabase.from("daily_threads").insert({ thread_date: date, channel: CHANNEL_ID, thread_ts: ts });
-      const { data: canon } = await supabase.from("daily_threads").select("thread_ts").eq("thread_date", date).eq("channel", CHANNEL_ID).maybeSingle();
-      if (canon) ts = canon.thread_ts;
-    }
-  }
+  const ts = existing ? existing.thread_ts : await createParent(date);
   if (!ts) return;
 
   const wp = await weeklyProgress(nickname);
@@ -365,6 +400,15 @@ function bg(p: Promise<unknown>) {
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") return new Response("ok", { status: 200 });
+
+  // Cron trigger (pg_cron) — no Slack signature; authenticated by a shared secret header
+  const cronSecret = req.headers.get("x-cron-secret");
+  if (cronSecret) {
+    if (cronSecret !== Deno.env.get("CRON_SECRET")) return new Response("forbidden", { status: 403 });
+    await bg(createDailyThread());
+    return empty();
+  }
+
   const rawBody = await req.text();
   if (!(await verifySlack(req, rawBody))) return new Response("invalid signature", { status: 401 });
 
