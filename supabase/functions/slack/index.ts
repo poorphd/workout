@@ -172,17 +172,16 @@ async function yesterdaySummary(date: string): Promise<string> {
   return `📊 어제(${ym}/${yd}) *${names.length}명* 인증${extra}\n🙌 ${names.join(", ")}`;
 }
 
-// create the day's parent thread message (recap + dashboard link) and store its ts
+// create the day's parent thread (title only) + first reply (yesterday recap + dashboard link)
 async function createParent(date: string): Promise<string | null> {
   if (!CHANNEL_ID) return null;
   const [, mm, dd] = date.split("-").map(Number);
-  const text = `*${mm}월 ${dd}일 운동 인증 스레드* 💪 오늘도 \`/운동 인증\` 으로!\n\n${await yesterdaySummary(date)}\n📈 대시보드: ${DASHBOARD_URL}`;
-  const parent = await slackPost({ channel: CHANNEL_ID, text });
-  if (parent?.ok && parent.ts) {
-    await supabase.from("daily_threads").upsert({ thread_date: date, channel: CHANNEL_ID, thread_ts: parent.ts });
-    return parent.ts;
-  }
-  return null;
+  const parent = await slackPost({ channel: CHANNEL_ID, text: `*${mm}월 ${dd}일 운동 인증 스레드* 💪 오늘도 \`/운동 인증\` 으로!` });
+  if (!(parent?.ok && parent.ts)) return null;
+  const ts = parent.ts;
+  await supabase.from("daily_threads").upsert({ thread_date: date, channel: CHANNEL_ID, thread_ts: ts });
+  await slackPost({ channel: CHANNEL_ID, thread_ts: ts, text: `${await yesterdaySummary(date)}\n📈 대시보드: ${DASHBOARD_URL}` });
+  return ts;
 }
 
 // midnight job: create today's thread up front (skips if it already exists)
