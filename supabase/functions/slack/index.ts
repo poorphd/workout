@@ -224,9 +224,14 @@ async function announceCheckin(nickname: string, workout: string | null, duratio
   if (!ts) return;
 
   const wp = await weeklyProgress(nickname);
-  const goalMsg = wp ? `\n🎯 이번주 목표 달성률 *${wp.pct}%* (${wp.count}/${wp.goal})` : "";
   const header = todayCount > 1 ? `*${nickname}* 님이 오늘 운동을 추가로 인증했어요!` : `*${nickname}* 님이 오늘의 운동을 인증했어요!`;
-  const text = `${header}${detailSuffix(workout, duration, calories)}\n${rankMsg}${goalMsg}`;
+  const lines = [header];
+  if (workout) lines.push(`🏋️ ${workout}`);
+  if (duration != null) lines.push(`⏱️ ${duration}분`);
+  if (calories != null) lines.push(`🔥 ${calories}kcal`);
+  lines.push(rankMsg);
+  if (wp) lines.push(`🎯 이번주 목표 달성률 *${wp.pct}%* (${wp.count}/${wp.goal})`);
+  const text = lines.join("\n");
 
   if (photo && await uploadPhotoToThread(ts, photo, text)) return; // photo + comment in one
   await slackPost({ channel: CHANNEL_ID, thread_ts: ts, text }); // text only (no photo / upload failed)
