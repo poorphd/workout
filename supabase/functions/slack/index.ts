@@ -123,27 +123,33 @@ async function unclaimedNicknames(): Promise<string[]> {
   return [...new Set((cks ?? []).map((c) => c.nickname))].filter((n) => !taken.has(n)).sort();
 }
 
-// ── upload a DM photo into the channel thread (download from Slack, re-upload) ──
-async function uploadPhotoToThread(threadTs: string, photo: { url: string; name: string; mime: string }, comment: string): Promise<boolean> {
+// ── upload DM photos into the channel thread (download from Slack, re-upload; multiple supported) ──
+type Photo = { url: string; name: string; mime: string };
+async function uploadPhotosToThread(threadTs: string, photos: Photo[], comment: string): Promise<boolean> {
   try {
-    const fileRes = await fetch(photo.url, { headers: { authorization: `Bearer ${BOT_TOKEN}` } });
-    const bytes = new Uint8Array(await fileRes.arrayBuffer());
-    const ctype = fileRes.headers.get("content-type") || "";
-    if (!fileRes.ok || ctype.includes("text/html")) { console.error("download failed (check files:read scope)"); return false; }
+    const uploaded: { id: string; title: string }[] = [];
+    for (const photo of photos) {
+      const fileRes = await fetch(photo.url, { headers: { authorization: `Bearer ${BOT_TOKEN}` } });
+      const bytes = new Uint8Array(await fileRes.arrayBuffer());
+      const ctype = fileRes.headers.get("content-type") || "";
+      if (!fileRes.ok || ctype.includes("text/html")) { console.error("download failed (check files:read scope)"); continue; }
 
-    const up = await (await fetch("https://slack.com/api/files.getUploadURLExternal", {
-      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Bearer ${BOT_TOKEN}` },
-      body: new URLSearchParams({ filename: photo.name, length: String(bytes.length) }),
-    })).json();
-    if (!up.ok) { console.error("getUploadURLExternal failed (check files:write scope):", up); return false; }
+      const up = await (await fetch("https://slack.com/api/files.getUploadURLExternal", {
+        method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Bearer ${BOT_TOKEN}` },
+        body: new URLSearchParams({ filename: photo.name, length: String(bytes.length) }),
+      })).json();
+      if (!up.ok) { console.error("getUploadURLExternal failed (check files:write scope):", up); continue; }
 
-    const fd = new FormData();
-    fd.append("file", new Blob([bytes], { type: photo.mime || "application/octet-stream" }), photo.name);
-    await fetch(up.upload_url, { method: "POST", body: fd });
+      const fd = new FormData();
+      fd.append("file", new Blob([bytes], { type: photo.mime || "application/octet-stream" }), photo.name);
+      await fetch(up.upload_url, { method: "POST", body: fd });
+      uploaded.push({ id: up.file_id, title: photo.name });
+    }
+    if (!uploaded.length) return false;
 
     const done = await (await fetch("https://slack.com/api/files.completeUploadExternal", {
       method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${BOT_TOKEN}` },
-      body: JSON.stringify({ files: [{ id: up.file_id, title: photo.name }], channel_id: CHANNEL_ID, thread_ts: threadTs, initial_comment: comment }),
+      body: JSON.stringify({ files: uploaded, channel_id: CHANNEL_ID, thread_ts: threadTs, initial_comment: comment }),
     })).json();
     if (!done.ok) console.error("completeUploadExternal failed:", done);
     return !!done.ok;
@@ -194,7 +200,7 @@ async function createDailyThread() {
 }
 
 // ── post the check-in thread comment (rank by distinct days; optional photo) ──
-async function announceCheckin(nickname: string, workout: string | null, duration: number | null, calories: number | null, todayCount: number, photo: { url: string; name: string; mime: string } | null) {
+async function announceCheckin(nickname: string, workout: string | null, duration: number | null, calories: number | null, todayCount: number, photos: Photo[]) {
   if (!CHANNEL_ID) return;
   const date = todayKST();
   const mm = Number(date.slice(5, 7));
@@ -233,7 +239,7 @@ async function announceCheckin(nickname: string, workout: string | null, duratio
   if (wp) lines.push(`🎯 이번주 목표 달성률 *${wp.pct}%* (${wp.count}/${wp.goal})`);
   const text = lines.join("\n");
 
-  if (photo && await uploadPhotoToThread(ts, photo, text)) return; // photo + comment in one
+  if (photos.length && await uploadPhotosToThread(ts, photos, text)) return; // photos + comment in one
   await slackPost({ channel: CHANNEL_ID, thread_ts: ts, text }); // text only (no photo / upload failed)
 }
 
@@ -263,7 +269,7 @@ async function startCheckin(uid: string) {
   else { await setSession(uid, "name", {}); await dm(uid, qName(await unclaimedNicknames())); }
 }
 
-async function finalize(uid: string, data: any, photo: { url: string; name: string; mime: string } | null) {
+async function finalize(uid: string, data: any, photos: Photo[]) {
   let member = await getMember(uid);
   if (!member) {
     await supabase.from("members").upsert({ slack_user_id: uid, nickname: data.name, weekly_goal: data.goal ?? null });
@@ -271,7 +277,7 @@ async function finalize(uid: string, data: any, photo: { url: string; name: stri
   }
   const workout = data.workout ?? null, dur = data.duration ?? null, cal = data.calories ?? null;
   const todayCount = await recordCheckin(member.nickname, uid, workout, dur, cal);
-  await announceCheckin(member.nickname, workout, dur, cal, todayCount, photo);
+  await announceCheckin(member.nickname, workout, dur, cal, todayCount, photos);
   await clearSession(uid);
   const extra = todayCount > 1 ? ` (오늘 ${todayCount}번째)` : "";
   await dm(uid, `오늘 운동 인증 완료! 🔥 (${member.nickname})${detailSuffix(workout, dur, cal)}${extra}`);
@@ -311,9 +317,10 @@ async function handleDM(event: any) {
       await setSession(uid, "photo", data); await dm(uid, Q.photo); return;
     }
     case "photo": {
-      const img = (event.files || []).find((f: any) => (f.mimetype || "").startsWith("image/"));
-      if (img) { await finalize(uid, data, { url: img.url_private, name: img.name || "checkin.jpg", mime: img.mimetype }); return; }
-      if (isSkip(text)) { await finalize(uid, data, null); return; }
+      const imgs: Photo[] = (event.files || []).filter((f: any) => (f.mimetype || "").startsWith("image/"))
+        .map((f: any) => ({ url: f.url_private, name: f.name || "checkin.jpg", mime: f.mimetype }));
+      if (imgs.length) { await finalize(uid, data, imgs); return; }
+      if (isSkip(text)) { await finalize(uid, data, []); return; }
       await dm(uid, "사진을 올리거나 `skip` 이라고 답해주세요."); return;
     }
   }
