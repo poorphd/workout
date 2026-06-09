@@ -174,8 +174,11 @@ async function yesterdaySummary(date: string): Promise<string> {
   const names = [...new Set(rows.map((r) => r.nickname as string))];
   const min = rows.reduce((s, r) => s + (r.duration_min ?? 0), 0);
   const cal = rows.reduce((s, r) => s + (r.calories ?? 0), 0);
-  const extra = (min || cal) ? ` · ${[min ? `⏱️ ${min}분` : "", cal ? `🔥 ${cal}kcal` : ""].filter(Boolean).join(" · ")}` : "";
-  return `📊 어제(${ym}/${yd}) *${names.length}명* 인증${extra}\n🙌 ${names.join(", ")}`;
+  const lines = [`📊 어제(${ym}/${yd}) *${names.length}명* 인증`];
+  if (min) lines.push(`⏱️ 합계 ${min}분`);
+  if (cal) lines.push(`🔥 합계 ${cal}kcal`);
+  lines.push(`🙌 ${names.join(", ")}`);
+  return lines.join("\n");
 }
 
 // create the day's parent thread (title only) + first reply (yesterday recap + dashboard link)
