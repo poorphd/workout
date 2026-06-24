@@ -293,7 +293,7 @@ async function finalize(uid: string, data: any, photos: Photo[]) {
   await clearSession(uid);
   const extra = todayCount > 1 ? ` (오늘 ${todayCount}번째)` : "";
   const link = await todayThreadLink();
-  const linkPart = link ? `\n🔗 오늘 인증 스레드: ${link}` : "";
+  const linkPart = link ? `\n🔗 <${link}|오늘 인증 스레드>` : "";
   await dm(uid, `오늘 운동 인증 완료! 🔥 (${member.nickname})${detailSuffix(workout, dur, cal)}${extra}${linkPart}`);
 }
 
