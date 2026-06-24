@@ -272,6 +272,15 @@ async function startCheckin(uid: string) {
   else { await setSession(uid, "name", {}); await dm(uid, qName(await unclaimedNicknames())); }
 }
 
+// permalink to today's thread parent message (null if unavailable)
+async function todayThreadLink(): Promise<string | null> {
+  if (!CHANNEL_ID) return null;
+  const { data } = await supabase.from("daily_threads").select("thread_ts").eq("thread_date", todayKST()).eq("channel", CHANNEL_ID).maybeSingle();
+  if (!data) return null;
+  const r = await (await fetch(`https://slack.com/api/chat.getPermalink?channel=${CHANNEL_ID}&message_ts=${data.thread_ts}`, { headers: { authorization: `Bearer ${BOT_TOKEN}` } })).json();
+  return r.ok ? r.permalink : null;
+}
+
 async function finalize(uid: string, data: any, photos: Photo[]) {
   let member = await getMember(uid);
   if (!member) {
@@ -283,7 +292,9 @@ async function finalize(uid: string, data: any, photos: Photo[]) {
   await announceCheckin(member.nickname, workout, dur, cal, todayCount, photos);
   await clearSession(uid);
   const extra = todayCount > 1 ? ` (오늘 ${todayCount}번째)` : "";
-  await dm(uid, `오늘 운동 인증 완료! 🔥 (${member.nickname})${detailSuffix(workout, dur, cal)}${extra}`);
+  const link = await todayThreadLink();
+  const linkPart = link ? `\n🔗 오늘 인증 스레드: ${link}` : "";
+  await dm(uid, `오늘 운동 인증 완료! 🔥 (${member.nickname})${detailSuffix(workout, dur, cal)}${extra}${linkPart}`);
 }
 
 async function handleDM(event: any) {
