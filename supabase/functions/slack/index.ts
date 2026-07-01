@@ -30,6 +30,13 @@ function weekStartKST(): string {
   dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7)); // back to Monday
   return dt.toISOString().slice(0, 10);
 }
+// Monday (week bucket key) for an arbitrary YYYY-MM-DD
+function weekKey(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7));
+  return dt.toISOString().slice(0, 10);
+}
 
 // ── Slack signature verification ──
 async function verifySlack(req: Request, rawBody: string): Promise<boolean> {
@@ -59,6 +66,7 @@ const HELP = [
   "• `/운동 순위` — 이번달 리더보드 (운동 일수)",
   "• `/운동 이름변경 새이름` — 닉네임 변경",
   "• `/운동 목표설정 5` — 주간 목표 일수 설정",
+  "• `/운동 추첨` — (관리자) 이번달 경품 추첨",
 ].join("\n");
 
 // ── small utils ──
@@ -105,7 +113,7 @@ async function monthlyDayCounts(ym: string): Promise<Record<string, number>> {
   return counts;
 }
 async function getMember(slackUserId: string) {
-  const { data } = await supabase.from("members").select("nickname, weekly_goal").eq("slack_user_id", slackUserId).maybeSingle();
+  const { data } = await supabase.from("members").select("nickname, weekly_goal, is_admin").eq("slack_user_id", slackUserId).maybeSingle();
   return data;
 }
 async function weeklyProgress(nickname: string) {
@@ -352,8 +360,35 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
     return ephemeral(HELP);
   }
 
-  if (["취소", "내기록", "이름변경", "목표설정"].includes(sub) && !member) {
+  if (["취소", "내기록", "이름변경", "목표설정", "추첨"].includes(sub) && !member) {
     return ephemeral("먼저 `/운동 인증` 으로 등록해주세요. 🙂");
+  }
+
+  if (sub === "추첨") {
+    if (!member!.is_admin) return ephemeral("추첨은 관리자만 실행할 수 있어요.");
+    const ym = rest[0] && /^\d{4}-\d{2}$/.test(rest[0]) ? rest[0] : thisMonthKST();
+    const [yy, mo] = ym.split("-").map(Number);
+    const next = mo === 12 ? `${yy + 1}-01-01` : `${yy}-${String(mo + 1).padStart(2, "0")}-01`;
+    const { data } = await supabase.from("checkins").select("nickname,checkin_date").gte("checkin_date", `${ym}-01`).lt("checkin_date", next);
+    // per person: weekKey -> distinct days; a week with >=3 days earns 1 ticket
+    const weeks: Record<string, Record<string, Set<string>>> = {};
+    for (const r of data ?? []) {
+      const wk = weekKey(r.checkin_date as string);
+      ((weeks[r.nickname] ??= {})[wk] ??= new Set()).add(r.checkin_date as string);
+    }
+    const entrants = Object.entries(weeks)
+      .map(([n, wkmap]) => ({ n, t: Object.values(wkmap).filter((days) => days.size >= 3).length }))
+      .filter((e) => e.t > 0);
+    const moName = MONTH_NAMES[mo - 1];
+    if (!entrants.length) return ephemeral(`${moName}에 주 3회 이상 인증한 주가 있는 사람이 없어서 추첨할 수 없어요.`);
+    const total = entrants.reduce((s, e) => s + e.t, 0);
+    let pick = Math.floor(Math.random() * total);
+    let winner = entrants[0];
+    for (const e of entrants) { if (pick < e.t) { winner = e; break; } pick -= e.t; }
+    if (CHANNEL_ID) {
+      await slackPost({ channel: CHANNEL_ID, text: `🎁 *${moName} 운동 경품 추첨!*\n응모 ${entrants.length}명 · 총 응모권 ${total}장 (주 3회 이상 인증한 주마다 1장)\n🎉 당첨: *${winner.n}* 님! (응모권 ${winner.t}장)\n축하합니다 👏` });
+    }
+    return ephemeral(`추첨 완료 🎉 당첨: ${winner.n} (응모권 ${winner.t}/${total}). 채널에 발표했어요.`);
   }
 
   if (sub === "취소") {
