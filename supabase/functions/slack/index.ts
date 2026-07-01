@@ -385,8 +385,11 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
     let pick = Math.floor(Math.random() * total);
     let winner = entrants[0];
     for (const e of entrants) { if (pick < e.t) { winner = e; break; } pick -= e.t; }
+    // tag the winner if we know their Slack id (fall back to nickname for unregistered names)
+    const { data: wm } = await supabase.from("members").select("slack_user_id").eq("nickname", winner.n).maybeSingle();
+    const mention = wm?.slack_user_id ? `<@${wm.slack_user_id}>` : `*${winner.n}*`;
     if (CHANNEL_ID) {
-      await slackPost({ channel: CHANNEL_ID, text: `🎁 *${moName} 운동 경품 추첨!*\n응모 ${entrants.length}명 · 총 응모권 ${total}장 (주 3회 이상 인증한 주마다 1장)\n🎉 당첨: *${winner.n}* 님! (응모권 ${winner.t}장)\n축하합니다 👏` });
+      await slackPost({ channel: CHANNEL_ID, text: `🎁 *${moName} 운동 경품 추첨!*\n응모 ${entrants.length}명 · 총 응모권 ${total}장 (주 3회 이상 인증한 주마다 1장)\n🎉 당첨: ${mention} 님! (응모권 ${winner.t}장)\n축하합니다 👏` });
     }
     return ephemeral(`추첨 완료 🎉 당첨: ${winner.n} (응모권 ${winner.t}/${total}). 채널에 발표했어요.`);
   }
