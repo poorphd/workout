@@ -66,7 +66,7 @@ const HELP = [
   "• `/운동 순위` — 이번달 리더보드 (운동 일수)",
   "• `/운동 이름변경 새이름` — 닉네임 변경",
   "• `/운동 목표설정 5` — 주간 목표 일수 설정",
-  "• `/운동 추첨` — (관리자) 이번달 경품 추첨",
+  "• `/운동 추첨 [인원수]` — (관리자) 이번달 경품 추첨",
 ].join("\n");
 
 // ── small utils ──
@@ -366,7 +366,12 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
 
   if (sub === "추첨") {
     if (!member!.is_admin) return ephemeral("추첨은 관리자만 실행할 수 있어요.");
-    const ym = rest[0] && /^\d{4}-\d{2}$/.test(rest[0]) ? rest[0] : thisMonthKST();
+    // args (any order): a count (integer) and/or a month (YYYY-MM)
+    let ym = thisMonthKST(), numWinners = 1;
+    for (const a of rest) {
+      if (/^\d{4}-\d{2}$/.test(a)) ym = a;
+      else if (/^\d+$/.test(a)) numWinners = Math.max(1, parseInt(a, 10));
+    }
     const [yy, mo] = ym.split("-").map(Number);
     const next = mo === 12 ? `${yy + 1}-01-01` : `${yy}-${String(mo + 1).padStart(2, "0")}-01`;
     const { data } = await supabase.from("checkins").select("nickname,checkin_date").gte("checkin_date", `${ym}-01`).lt("checkin_date", next);
@@ -382,16 +387,32 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
     const moName = MONTH_NAMES[mo - 1];
     if (!entrants.length) return ephemeral(`${moName}에 주 3회 이상 인증한 주가 있는 사람이 없어서 추첨할 수 없어요.`);
     const total = entrants.reduce((s, e) => s + e.t, 0);
-    let pick = Math.floor(Math.random() * total);
-    let winner = entrants[0];
-    for (const e of entrants) { if (pick < e.t) { winner = e; break; } pick -= e.t; }
-    // tag the winner if we know their Slack id (fall back to nickname for unregistered names)
-    const { data: wm } = await supabase.from("members").select("slack_user_id").eq("nickname", winner.n).maybeSingle();
-    const mention = wm?.slack_user_id ? `<@${wm.slack_user_id}>` : `*${winner.n}*`;
-    if (CHANNEL_ID) {
-      await slackPost({ channel: CHANNEL_ID, text: `🎁 *${moName} 운동 경품 추첨!*\n응모 ${entrants.length}명 · 총 응모권 ${total}장 (주 3회 이상 인증한 주마다 1장)\n🎉 당첨: ${mention} 님! (응모권 ${winner.t}장)\n축하합니다 👏` });
+
+    // weighted sampling without replacement
+    const pool = [...entrants];
+    const winners: { n: string; t: number }[] = [];
+    const k = Math.min(numWinners, pool.length);
+    for (let w = 0; w < k; w++) {
+      const tot = pool.reduce((s, e) => s + e.t, 0);
+      let pick = Math.floor(Math.random() * tot), idx = 0;
+      for (let i = 0; i < pool.length; i++) { if (pick < pool[i].t) { idx = i; break; } pick -= pool[i].t; }
+      winners.push(pool[idx]);
+      pool.splice(idx, 1);
     }
-    return ephemeral(`추첨 완료 🎉 당첨: ${winner.n} (응모권 ${winner.t}/${total}). 채널에 발표했어요.`);
+
+    // resolve mentions (tag winners we know the Slack id for)
+    const { data: mems } = await supabase.from("members").select("nickname,slack_user_id").in("nickname", winners.map((w) => w.n));
+    const idOf: Record<string, string> = {};
+    for (const m of mems ?? []) if (m.slack_user_id) idOf[m.nickname] = m.slack_user_id;
+    const lines = winners.map((w, i) => {
+      const who = idOf[w.n] ? `<@${idOf[w.n]}>` : `*${w.n}*`;
+      return `${k > 1 ? `${i + 1}. ` : ""}${who} 님 (응모권 ${w.t}장)`;
+    });
+    if (CHANNEL_ID) {
+      const title = k > 1 ? `🎁 *${moName} 운동 경품 추첨!* (${k}명)` : `🎁 *${moName} 운동 경품 추첨!*`;
+      await slackPost({ channel: CHANNEL_ID, text: `${title}\n응모 ${entrants.length}명 · 총 응모권 ${total}장 (주 3회 이상 인증한 주마다 1장)\n🎉 당첨:\n${lines.join("\n")}\n축하합니다 👏` });
+    }
+    return ephemeral(`추첨 완료 🎉 당첨 ${k}명: ${winners.map((w) => w.n).join(", ")}. 채널에 발표했어요.`);
   }
 
   if (sub === "취소") {
