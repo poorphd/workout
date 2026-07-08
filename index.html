@@ -75,6 +75,8 @@
   table.heat td { padding: 0; }
   .cell-wrap { padding: 1.5px; }
   .total-cell { font-size: 11px; color: var(--muted); padding-left: 8px; font-weight: 700; white-space: nowrap; }
+  .ticket-cell { font-size: 12px; color: var(--accent); font-weight: 800; text-align: left; white-space: nowrap; }
+  table.heat td.ticket-cell { padding-left: 16px; } /* beat table.heat td { padding:0 } */
 
   /* top-3 hall of fame */
   .t3-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
@@ -144,6 +146,24 @@ let CUR_MONTH = null;
 
 function daysInMonth(year, month) { return new Date(year, month, 0).getDate(); }
 function fmtDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+
+// Sunday (last day) of the Mon–Sun week containing dateStr; a week is attributed to this month
+function weekSunday(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7) + 6); // to Monday, then +6 = Sunday
+  return dt.toISOString().slice(0, 10);
+}
+// raffle tickets for a person in a month: weeks (attributed by Sunday) with >=3 distinct check-in days
+function ticketsFor(name, monthKey) {
+  const weeks = {};
+  for (const d of (ALLDATES[name] || [])) {
+    const sun = weekSunday(d);
+    if (sun.slice(0, 7) !== monthKey) continue;
+    (weeks[sun] = weeks[sun] || new Set()).add(d);
+  }
+  return Object.values(weeks).filter((s) => s.size >= 3).length;
+}
 function fmtDur(min) {
   if (!min) return "0분";
   const h = Math.floor(min / 60), m = min % 60;
@@ -283,7 +303,7 @@ function render(monthKey) {
 
   // heatmap
   const allDays = Array.from({ length: totalDays }, (_, i) => i + 1);
-  const head = "<tr><th></th>" + allDays.map((d) => `<th class="day">${d}</th>`).join("") + "<th></th></tr>";
+  const head = "<tr><th></th>" + allDays.map((d) => `<th class="day">${d}</th>`).join("") + `<th></th><th></th></tr>`;
   const rows = ranked.map((r) => {
     const cells = allDays.map((d) => {
       const c = r.byDay[d] || 0;
@@ -291,7 +311,8 @@ function render(monthKey) {
       const title = c ? ` title="${month}/${d} · ${c}회"` : "";
       return `<td><div class="cell-wrap"><div class="cell${cls}"${title}></div></div></td>`;
     }).join("");
-    return `<tr><td class="name-cell">${r.name}</td>${cells}<td class="total-cell">${r.days}일</td></tr>`;
+    const tk = ticketsFor(r.name, monthKey);
+    return `<tr><td class="name-cell">${r.name}</td>${cells}<td class="total-cell">${r.days}일</td><td class="ticket-cell">🎟️ ${tk}</td></tr>`;
   }).join("");
 
   // this-month TOP 3 (from the month aggregation)
@@ -340,7 +361,7 @@ function render(monthKey) {
       <h2>🎯 이번주 목표 현황 <span class="sub">월~일</span></h2>${goalsHtml}
     </section>
     <section>
-      <h2>🟩 인증 잔디 <span class="sub">사람 × 날짜</span></h2>
+      <h2>🟩 인증 잔디 <span class="sub">사람 × 날짜 · 🎟️ = 추첨 응모권 · 한 주(월~일)에 3일 이상 인증하면 1장 (그 주 일요일이 속한 달 기준)</span></h2>
       <div class="heat-scroll"><table class="heat">${head}${rows}</table></div>
       <div class="legend"><span>적게</span><span class="cell"></span><span class="cell l1"></span><span class="cell l2"></span><span class="cell l3"></span><span>여러 번</span></div>
     </section>

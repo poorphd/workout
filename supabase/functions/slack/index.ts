@@ -37,6 +37,8 @@ function weekKey(dateStr: string): string {
   dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7));
   return dt.toISOString().slice(0, 10);
 }
+// Sunday (last day) of the Mon–Sun week containing the date; a week is attributed to this month
+function weekSunday(dateStr: string): string { return addDaysKST(weekKey(dateStr), 6); }
 
 // ── Slack signature verification ──
 async function verifySlack(req: Request, rawBody: string): Promise<boolean> {
@@ -374,12 +376,15 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
     }
     const [yy, mo] = ym.split("-").map(Number);
     const next = mo === 12 ? `${yy + 1}-01-01` : `${yy}-${String(mo + 1).padStart(2, "0")}-01`;
-    const { data } = await supabase.from("checkins").select("nickname,checkin_date").gte("checkin_date", `${ym}-01`).lt("checkin_date", next);
-    // per person: weekKey -> distinct days; a week with >=3 days earns 1 ticket
+    // widen the window so weeks whose Sunday falls in this month are fully captured (they may start in the prev month)
+    const { data } = await supabase.from("checkins").select("nickname,checkin_date")
+      .gte("checkin_date", addDaysKST(`${ym}-01`, -7)).lt("checkin_date", addDaysKST(next, 7));
+    // bucket by (person, week's Sunday); a week counts for this month if its Sunday is in it; >=3 distinct days = 1 ticket
     const weeks: Record<string, Record<string, Set<string>>> = {};
     for (const r of data ?? []) {
-      const wk = weekKey(r.checkin_date as string);
-      ((weeks[r.nickname] ??= {})[wk] ??= new Set()).add(r.checkin_date as string);
+      const sun = weekSunday(r.checkin_date as string);
+      if (sun.slice(0, 7) !== ym) continue;
+      ((weeks[r.nickname] ??= {})[sun] ??= new Set()).add(r.checkin_date as string);
     }
     const entrants = Object.entries(weeks)
       .map(([n, wkmap]) => ({ n, t: Object.values(wkmap).filter((days) => days.size >= 3).length }))
