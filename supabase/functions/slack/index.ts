@@ -409,9 +409,11 @@ async function handleCommand(params: URLSearchParams): Promise<Response> {
     const { data: mems } = await supabase.from("members").select("nickname,slack_user_id").in("nickname", winners.map((w) => w.n));
     const idOf: Record<string, string> = {};
     for (const m of mems ?? []) if (m.slack_user_id) idOf[m.nickname] = m.slack_user_id;
+    const medals = ["🥇", "🥈", "🥉"];
     const lines = winners.map((w, i) => {
       const who = idOf[w.n] ? `<@${idOf[w.n]}>` : `*${w.n}*`;
-      return `${k > 1 ? `${i + 1}. ` : ""}${who} 님 (응모권 ${w.t}장)`;
+      const rank = `${medals[i] ?? "🎗️"} ${i + 1}등`;
+      return `${rank}: ${who} 님 (응모권 ${w.t}장)`;
     });
     if (CHANNEL_ID) {
       const title = k > 1 ? `🎁 *${moName} 운동 경품 추첨!* (${k}명)` : `🎁 *${moName} 운동 경품 추첨!*`;
